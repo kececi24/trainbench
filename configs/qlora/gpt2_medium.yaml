@@ -1,0 +1,29 @@
+experiment:
+  name: gpt2_medium_qlora
+  seed: 42
+model:
+  name: openai-community/gpt2-medium
+  dtype: float16
+method:
+  name: qlora
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules:
+  - c_attn
+  - c_proj
+  use_dora: false
+  quantization: nf4
+data:
+  dataset_name: yahma/alpaca-cleaned
+  max_length: 256
+  batch_size: 4
+  train_samples: 1000
+training:
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  max_steps: 100
+  warmup_steps: 10
+  gradient_clip: 1.0
+tracking:
+  log_dir: logs

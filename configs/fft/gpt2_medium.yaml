@@ -1,0 +1,21 @@
+experiment:
+  name: gpt2_medium_fft
+  seed: 42
+model:
+  name: openai-community/gpt2-medium
+  dtype: float16
+method:
+  name: fft
+data:
+  dataset_name: yahma/alpaca-cleaned
+  max_length: 256
+  batch_size: 2
+  train_samples: 1000
+training:
+  learning_rate: 2.0e-05
+  weight_decay: 0.01
+  max_steps: 100
+  warmup_steps: 10
+  gradient_clip: 1.0
+tracking:
+  log_dir: logs

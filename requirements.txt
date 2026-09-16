@@ -1,0 +1,13 @@
+--extra-index-url https://download.pytorch.org/whl/cu126
+
+torch
+torchvision
+accelerate
+transformers
+peft
+bitsandbytes
+datasets
+pyyaml
+matplotlib
+numpy
+scipy

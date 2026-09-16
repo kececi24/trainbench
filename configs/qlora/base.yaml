@@ -1,0 +1,32 @@
+experiment:
+  name: "qlora_stage1_baseline"
+  seed: 42
+
+model:
+  name: "Qwen/Qwen2.5-0.5B"
+  dtype: "bfloat16"
+
+method:
+  name: "qlora"
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  use_dora: false
+  quantization: "nf4"
+
+data:
+  dataset_name: "yahma/alpaca-cleaned"
+  max_length: 256
+  batch_size: 2
+  train_samples: 500
+
+training:
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  max_steps: 50
+  warmup_steps: 5
+  gradient_clip: 1.0
+
+tracking:
+  log_dir: "logs"

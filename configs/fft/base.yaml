@@ -1,0 +1,26 @@
+experiment:
+  name: "fft_stage1_baseline"
+  seed: 42
+
+model:
+  name: "Qwen/Qwen2.5-0.5B"
+  dtype: "bfloat16"
+
+method:
+  name: "fft"
+
+data:
+  dataset_name: "yahma/alpaca-cleaned"
+  max_length: 256
+  batch_size: 2
+  train_samples: 500
+
+training:
+  learning_rate: 2.0e-5   # Lower learning rate for full fine-tuning (Roadmap Section 37)
+  weight_decay: 0.01
+  max_steps: 50
+  warmup_steps: 5
+  gradient_clip: 1.0
+
+tracking:
+  log_dir: "logs"
