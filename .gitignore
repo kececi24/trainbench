@@ -70,3 +70,10 @@ Thumbs.db
 plots/
 data/
 *.jsonl
+
+# Archive files
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+*.7z
