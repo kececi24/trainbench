@@ -11,6 +11,8 @@
 #   --model  <model_id|all>              Target model id, e.g. qwen2.5_0.5b (default: all)
 #   --profile                            Enable CUPTI/PyTorch profiling on runs
 #   --skip-existing                      Skip runs that already have completed logs
+#   --skip-eval                          Skip held-out and forgetting evaluation
+#   --skip-svd                           Skip weight-space SVD rank analysis
 #   --help                               Display this help message
 # ==============================================================================
 
@@ -34,6 +36,8 @@ TARGET_METHOD="all"
 TARGET_MODEL="all"
 ENABLE_PROFILE=""
 SKIP_EXISTING=false
+SKIP_EVAL=false
+SKIP_SVD=false
 
 export HF_HOME="$(pwd)/data/huggingface_cache"
 
@@ -56,8 +60,16 @@ while [[ $# -gt 0 ]]; do
             SKIP_EXISTING=true
             shift
             ;;
+        --skip-eval)
+            SKIP_EVAL=true
+            shift
+            ;;
+        --skip-svd)
+            SKIP_SVD=true
+            shift
+            ;;
         --help)
-            head -n 16 "$0" | tail -n 13
+            head -n 18 "$0" | tail -n 15
             exit 0
             ;;
         *)
@@ -77,7 +89,7 @@ if [[ ! -d "configs" || ! -d "src" ]]; then
     fi
 fi
 
-mkdir -p logs plots results
+mkdir -p logs plots results checkpoints data/huggingface_cache
 
 # Define methods to iterate
 METHODS=()
@@ -89,10 +101,13 @@ fi
 
 echo -e "${BLUE}============================================================${NC}"
 echo -e "${BLUE} LLM Fine-Tuning Efficiency Benchmark Orchestrator (Ubuntu)  ${NC}"
-echo -e "${BLUE} Python:   $($PYTHON_BIN --version 2>&1)${NC}"
-echo -e "${BLUE} Methods:  ${METHODS[*]}${NC}"
-echo -e "${BLUE} Model:    ${TARGET_MODEL}${NC}"
-echo -e "${BLUE} Profiler: ${ENABLE_PROFILE:-Disabled}${NC}"
+echo -e "${BLUE} Python:      $($PYTHON_BIN --version 2>&1)${NC}"
+echo -e "${BLUE} Methods:     ${METHODS[*]}${NC}"
+echo -e "${BLUE} Model:       ${TARGET_MODEL}${NC}"
+echo -e "${BLUE} Profiler:    ${ENABLE_PROFILE:-Disabled}${NC}"
+echo -e "${BLUE} Evaluation:  $([[ "$SKIP_EVAL" == true ]] && echo "Disabled" || echo "Enabled")${NC}"
+echo -e "${BLUE} SVD Rank:    $([[ "$SKIP_SVD" == true ]] && echo "Disabled" || echo "Enabled")${NC}"
+echo -e "${BLUE} Cache Dir:   $HF_HOME${NC}"
 echo -e "${BLUE}============================================================${NC}\n"
 
 START_TIME=$(date +%s)
@@ -109,14 +124,12 @@ for method in "${METHODS[@]}"; do
         continue
     fi
 
-    # Find all yaml config files in method directory
     for config_file in "$CONFIG_DIR"/*.yaml; do
         [[ -f "$config_file" ]] || continue
         
-        # Extract model filename (e.g. qwen2.5_0.5b.yaml -> qwen2.5_0.5b)
         config_name=$(basename "$config_file" .yaml)
         
-        # Skip base.yaml templates
+        # Skip base.yaml template
         if [[ "$config_name" == "base" ]]; then
             continue
         fi
@@ -129,6 +142,10 @@ for method in "${METHODS[@]}"; do
         TOTAL_RUNS=$((TOTAL_RUNS + 1))
         RUN_NAME="${config_name}_${method}"
         LOG_PATH="logs/${RUN_NAME}.jsonl"
+        CHECKPOINT_DIR="checkpoints/${RUN_NAME}"
+
+        # Extract base model name from yaml config
+        BASE_MODEL=$($PYTHON_BIN -c "import yaml; print(yaml.safe_load(open('$config_file'))['model']['name'])" 2>/dev/null || echo "")
 
         # Check if already completed
         if [[ "$SKIP_EXISTING" == true && -s "$LOG_PATH" ]]; then
@@ -139,17 +156,33 @@ for method in "${METHODS[@]}"; do
 
         echo -e "${GREEN}------------------------------------------------------------${NC}"
         echo -e "${GREEN}[RUN #${TOTAL_RUNS}] Launching: Method=${method^^} | Model=${config_name}${NC}"
-        echo -e "${GREEN}Config: $config_file${NC}"
+        echo -e "${GREEN}Config:     $config_file${NC}"
+        echo -e "${GREEN}Checkpoint: $CHECKPOINT_DIR${NC}"
         echo -e "${GREEN}------------------------------------------------------------${NC}"
 
         RUN_START=$(date +%s)
 
-        # Execute training run
+        # 1. Execute training run (saves logs & checkpoints)
         if $PYTHON_BIN src/train.py --config "$config_file" $ENABLE_PROFILE; then
             RUN_END=$(date +%s)
             DURATION=$((RUN_END - RUN_START))
-            echo -e "${GREEN}[SUCCESS] Finished $RUN_NAME in ${DURATION}s.${NC}\n"
+            echo -e "${GREEN}[SUCCESS] Training finished for $RUN_NAME in ${DURATION}s.${NC}"
             SUCCESSFUL_RUNS=$((SUCCESSFUL_RUNS + 1))
+
+            # 2. Run held-out evaluation & catastrophic forgetting
+            if [[ "$SKIP_EVAL" != true && -n "$BASE_MODEL" ]]; then
+                echo -e "${BLUE}[Evaluation] Running held-out eval and forgetting on $RUN_NAME...${NC}"
+                EVAL_JSON="results/${RUN_NAME}_eval.json"
+                $PYTHON_BIN src/evaluate.py --model "$BASE_MODEL" --adapter "$CHECKPOINT_DIR" --output-json "$EVAL_JSON" || echo -e "${YELLOW}[Warning] Evaluation failed.${NC}"
+            fi
+
+            # 3. Run weight-space SVD and rank analysis (for PEFT methods)
+            if [[ "$SKIP_SVD" != true && "$method" != "fft" && -n "$BASE_MODEL" ]]; then
+                echo -e "${BLUE}[SVD Analysis] Running weight update SVD on $RUN_NAME...${NC}"
+                SVD_JSON="results/${RUN_NAME}_svd.json"
+                $PYTHON_BIN src/weight_analysis.py --model "$BASE_MODEL" --adapter "$CHECKPOINT_DIR" --output-json "$SVD_JSON" || echo -e "${YELLOW}[Warning] SVD analysis failed.${NC}"
+            fi
+            echo ""
         else
             echo -e "${RED}[FAILED] Experiment $RUN_NAME exited with an error.${NC}\n"
             FAILED_RUNS=$((FAILED_RUNS + 1))
@@ -175,7 +208,7 @@ $PYTHON_BIN -c "
 import glob, sys
 sys.path.insert(0, 'src')
 from analysis import generate_summary_table
-logs = glob.glob('logs/*.jsonl')
+logs = sorted(glob.glob('logs/*.jsonl'))
 if logs:
     generate_summary_table(logs)
 " || true
@@ -183,4 +216,4 @@ if logs:
 echo -e "${BLUE}[Post-Run Analysis] Generating Comparative Plots...${NC}"
 $PYTHON_BIN src/plot_curves.py || true
 
-echo -e "\n${GREEN}All benchmark logs saved to 'logs/' and plots to 'plots/'.${NC}"
+echo -e "\n${GREEN}All logs in 'logs/', checkpoints in 'checkpoints/', and results in 'results/'.${NC}"

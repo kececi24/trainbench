@@ -139,6 +139,15 @@ def train(config, enable_profiling: bool = False):
         print("\n--- Top 15 CUDA Kernels by Time (CUPTI) ---")
         print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=15))
 
+    # Save Model Checkpoint & Tokenizer
+    checkpoint_dir = getattr(config.tracking, "checkpoint_dir", f"checkpoints/{config.experiment.name}")
+    import os
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    print(f"\n[Checkpoint] Saving weights to: {checkpoint_dir}...")
+    model.save_pretrained(checkpoint_dir)
+    tokenizer.save_pretrained(checkpoint_dir)
+    print(f"[Checkpoint] Weights and tokenizer successfully saved to: {checkpoint_dir}")
+
 
 def dict_to_namespace(d):
     """Recursively converts a dictionary into SimpleNamespace objects for dot-notation access."""
@@ -161,6 +170,3 @@ if __name__ == "__main__":
 
     config = dict_to_namespace(config_dict)
     train(config, enable_profiling=args.profile)
-
-
-     

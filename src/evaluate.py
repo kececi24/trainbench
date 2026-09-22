@@ -144,21 +144,83 @@ def compute_forgetting_metrics(base_model_name: str, adapter_checkpoint_path: st
     return results
 
 
-if __name__ == "__main__":
-    # Test evaluation module on base model
-    model_name = "Qwen/Qwen2.5-0.5B"
+def run_evaluation(base_model_name: str, adapter_checkpoint_path: str = None, dataset_name: str = "yahma/alpaca-cleaned", output_json: str = None) -> dict:
+    """
+    Executes full evaluation:
+    1. Held-out validation loss & perplexity on target instruction task.
+    2. Catastrophic forgetting assessment on general language capability.
+    Saves results to output_json if provided.
+    """
+    import os
+    import json
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
 
-    print("--- Running Test Evaluation on Base Model ---")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    print(f"\n[Evaluation] Loading model: {base_model_name}")
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    raw_val = load_dataset("yahma/alpaca-cleaned", split="train[100:120]")
-    val_dataset = InstructionDataset(raw_val, tokenizer, max_length=256)
-    val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False, collate_fn=lambda b: collate_fn(b, tokenizer.pad_token_id))
+    # 1. Target Validation Performance (Held-Out Split)
+    print(f"[Evaluation] Evaluating held-out validation set from {dataset_name}...")
+    try:
+        raw_val = load_dataset(dataset_name, split="train[450:500]")
+        val_dataset = InstructionDataset(raw_val, tokenizer, max_length=256)
+        val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False, collate_fn=lambda b: collate_fn(b, tokenizer.pad_token_id))
 
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype, device_map=device)
-    val_results = evaluate_dataset(model, val_loader, device=device)
-    print(f"Validation Target Loss: {val_results['val_loss']} | PPL: {val_results['val_ppl']} across {val_results['eval_tokens']} tokens")
+        if adapter_checkpoint_path is not None and os.path.exists(adapter_checkpoint_path):
+            adapter_config = os.path.join(adapter_checkpoint_path, "adapter_config.json")
+            if os.path.exists(adapter_config):
+                base_model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=dtype, device_map=device)
+                model = PeftModel.from_pretrained(base_model, adapter_checkpoint_path)
+            else:
+                model = AutoModelForCausalLM.from_pretrained(adapter_checkpoint_path, torch_dtype=dtype, device_map=device)
+        else:
+            model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=dtype, device_map=device)
+
+        target_metrics = evaluate_dataset(model, val_loader, device=device)
+    except Exception as e:
+        print(f"[Evaluation Warning] Could not evaluate target validation set: {e}")
+        target_metrics = {"val_loss": None, "val_ppl": None, "eval_tokens": 0}
+
+    # 2. Catastrophic Forgetting
+    print(f"[Evaluation] Measuring catastrophic forgetting...")
+    try:
+        forgetting_metrics = compute_forgetting_metrics(base_model_name, adapter_checkpoint_path)
+    except Exception as e:
+        print(f"[Evaluation Warning] Could not evaluate forgetting: {e}")
+        forgetting_metrics = {"delta_loss_forgetting": None, "delta_ppl_forgetting": None}
+
+    combined = {
+        "model": base_model_name,
+        "adapter": adapter_checkpoint_path,
+        "target_val_loss": target_metrics.get("val_loss"),
+        "target_val_ppl": target_metrics.get("val_ppl"),
+        "eval_tokens": target_metrics.get("eval_tokens"),
+        **forgetting_metrics
+    }
+
+    if output_json:
+        os.makedirs(os.path.dirname(output_json) if os.path.dirname(output_json) else ".", exist_ok=True)
+        with open(output_json, "w", encoding="utf-8") as f:
+            json.dump(combined, f, indent=2)
+        print(f"[Evaluation] Results successfully saved to: {output_json}")
+
+    return combined
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Evaluate target performance and catastrophic forgetting")
+    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-0.5B", help="Base model name or path")
+    parser.add_argument("--adapter", type=str, default=None, help="Path to fine-tuned checkpoint / adapter")
+    parser.add_argument("--dataset", type=str, default="yahma/alpaca-cleaned", help="Target evaluation dataset")
+    parser.add_argument("--output-json", type=str, default=None, help="Path to save results JSON")
+
+    args = parser.parse_args()
+    run_evaluation(
+        base_model_name=args.model,
+        adapter_checkpoint_path=args.adapter,
+        dataset_name=args.dataset,
+        output_json=args.output_json
+    )

@@ -106,14 +106,18 @@ def extract_lora_delta_w(peft_model, target_module_name: str = "layers.0.self_at
     return delta_w
 
 
-def analyze_model_updates(base_model_name: str, adapter_path: str = None) -> dict:
+def analyze_model_updates(base_model_name: str, adapter_path: str = None, output_json: str = None) -> dict:
     """
     Performs comprehensive SVD and rank analysis on adapted linear layers.
+    Dynamically discovers adapted LoRA modules across any model architecture.
     """
+    import os
+    import json
+
     print(f"\n[Weight Analysis] Loading base model: {base_model_name}")
     base_model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32, device_map="cpu")
 
-    if adapter_path is not None:
+    if adapter_path is not None and os.path.exists(adapter_path):
         print(f"Loading adapter: {adapter_path}")
         peft_model = PeftModel.from_pretrained(base_model, adapter_path)
     else:
@@ -122,35 +126,65 @@ def analyze_model_updates(base_model_name: str, adapter_path: str = None) -> dic
         config = LoraConfig(r=16, lora_alpha=32, target_modules=["q_proj", "v_proj"], task_type=TaskType.CAUSAL_LM)
         peft_model = get_peft_model(base_model, config)
 
-    target_layers = [
-        "layers.0.self_attn.q_proj",
-        "layers.0.self_attn.v_proj"
-    ]
+    # Dynamically find adapted modules
+    adapted_modules = []
+    for name, module in peft_model.named_modules():
+        if hasattr(module, "lora_A") and hasattr(module, "lora_B"):
+            adapted_modules.append(name)
+
+    if not adapted_modules:
+        print("[Weight Analysis Warning] No LoRA adapter modules found to analyze.")
+        return {}
+
+    # Sample key adapted modules (e.g. first layer and last layer modules to keep output clean)
+    target_modules = adapted_modules[:4]
 
     report = {}
-    print("\n" + "=" * 75)
-    print(f"{'Module Name':<30} {'Rank':<8} {'Eff. Rank':<12} {'Frob Norm':<12} {'Spectral':<10}")
-    print("-" * 75)
+    print("\n" + "=" * 85)
+    print(f"{'Module Name':<40} {'Rank':<8} {'Eff. Rank':<12} {'Frob Norm':<12} {'Spectral':<10}")
+    print("-" * 85)
 
-    for target in target_layers:
-        delta_w = extract_lora_delta_w(peft_model, target)
+    for target in target_modules:
+        try:
+            delta_w = extract_lora_delta_w(peft_model, target)
 
-        # Get base weight W0
-        w0 = None
-        for name, param in base_model.named_parameters():
-            if target in name and "weight" in name and "lora" not in name:
-                w0 = param.data
-                break
+            # Get base weight W0
+            w0 = None
+            for name, param in base_model.named_parameters():
+                clean_target = target.replace("base_model.model.", "")
+                if clean_target in name and "weight" in name and "lora" not in name:
+                    w0 = param.data
+                    break
 
-        metrics = compute_matrix_svd_metrics(delta_w, w0)
-        report[target] = metrics
+            metrics = compute_matrix_svd_metrics(delta_w, w0)
+            report[target] = metrics
 
-        nominal_rank = min(delta_w.shape[0], delta_w.shape[1], 16)
-        print(f"{target:<30} {nominal_rank:<8} {metrics['effective_rank']:<12} {metrics['frobenius_norm']:<12} {metrics['spectral_norm']:<10}")
+            nominal_rank = min(delta_w.shape[0], delta_w.shape[1], 16)
+            print(f"{target[-38:]:<40} {nominal_rank:<8} {metrics['effective_rank']:<12} {metrics['frobenius_norm']:<12} {metrics['spectral_norm']:<10}")
+        except Exception as e:
+            print(f"[Weight Analysis Warning] Could not analyze {target}: {e}")
 
-    print("=" * 75)
+    print("=" * 85)
+
+    if output_json:
+        os.makedirs(os.path.dirname(output_json) if os.path.dirname(output_json) else ".", exist_ok=True)
+        with open(output_json, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+        print(f"[Weight Analysis] Results successfully saved to: {output_json}")
+
     return report
 
 
 if __name__ == "__main__":
-    analyze_model_updates("Qwen/Qwen2.5-0.5B")
+    import argparse
+    parser = argparse.ArgumentParser(description="Weight SVD and Rank Analysis")
+    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-0.5B", help="Base model name or path")
+    parser.add_argument("--adapter", type=str, default=None, help="Path to adapter checkpoint")
+    parser.add_argument("--output-json", type=str, default=None, help="Path to save SVD results JSON")
+
+    args = parser.parse_args()
+    analyze_model_updates(
+        base_model_name=args.model,
+        adapter_path=args.adapter,
+        output_json=args.output_json
+    )
