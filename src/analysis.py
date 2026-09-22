@@ -67,21 +67,33 @@ def find_pareto_frontier(results: list[dict], metric_x: str, metric_y: str) -> l
 
     return frontier
 
-def generate_summary_table(log_files: list[str], target_loss: float = 1.20):
-    print("| Method | Final Loss | PPL | Tokens-to-Target | Time-to-Target | FLOPs-to-Target | Peak VRAM | NAULC |")
+def generate_summary_table(log_files: list[str], target_loss: float = 1.20, output_path: str | None = None):
+    header = "| Method | Final Loss | PPL | Tokens-to-Target | Time-to-Target | FLOPs-to-Target | Peak VRAM | NAULC |"
+    lines = [header, "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"]
+    print(header)
 
     for file in log_files:
         log = load_log(filepath=file)
+        if not log:
+            continue
 
         fl = log[-1]["loss"]
-        ppl = numpy.exp(fl)
+        ppl = numpy.exp(fl) if not numpy.isnan(fl) else float("nan")
         tokentt = tokens_to_target(log, target_loss)
         timett = time_to_target(log, target_loss)
         floptt = compute_to_target(log, target_loss)
         peakvram = log[-1]["peak_vram_mb"]
         naulc = calculate_naulc(log)
 
-        print(f"{file} | {fl} | {ppl} | {tokentt} | {timett} | {floptt} | {peakvram} | {naulc}")
+        line = f"| {os.path.basename(file).replace('.jsonl', '')} | {fl:.4f} | {ppl:.2f} | {tokentt} | {timett} | {floptt} | {peakvram:.1f} | {naulc:.4f} |"
+        print(line)
+        lines.append(line)
+
+    if output_path:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        print(f"\nSummary table saved to {output_path}")
 
 if __name__ == "__main__":
     # Test run

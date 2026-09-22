@@ -1,102 +1,286 @@
 import os
+import glob
+import math
+import numpy as np
 import matplotlib.pyplot as plt
 
-from analysis import load_log
+try:
+    from analysis import load_log
+except ImportError:
+    from src.analysis import load_log
+
+# Visual palette for fine-tuning methods
+METHOD_COLORS = {
+    "fft": "#e41a1c",     # Strong Red
+    "lora": "#377eb8",    # Professional Blue
+    "dora": "#984ea3",    # Deep Purple
+    "qlora": "#4daf4a",   # Emerald Green
+}
+
+METHOD_LABELS = {
+    "fft": "FFT (Full Fine-Tuning)",
+    "lora": "LoRA (r=16, alpha=32)",
+    "dora": "DoRA (r=16, alpha=32)",
+    "qlora": "QLoRA (4-bit NF4)",
+}
+
+# Accurate model parameter counts for compute (FLOP) calculations
+MODEL_PARAMS = {
+    "gpt2_medium": 355_000_000,
+    "pythia_410m": 410_000_000,
+    "qwen2.5_0.5b": 494_032_768,
+    "llama3.2_1b": 1_230_000_000,
+    "pythia_1.4b": 1_400_000_000,
+    "qwen2.5_1.5b": 1_540_000_000,
+    "llama3.2_3b": 3_210_000_000,
+    "qwen2.5_3b": 3_090_000_000,
+    "minitron_4b": 4_000_000_000,
+    "nemotron_mini_4b": 4_000_000_000,
+    "llama2_7b": 6_740_000_000,
+    "qwen2.5_7b": 7_615_616_000,
+    "llama3.1_8b": 8_030_000_000,
+    "llama2_13b": 13_020_000_000,
+    "qwen2.5_14b": 14_770_000_000,
+}
+
+def parse_run_name(name: str) -> tuple[str, str]:
+    """Extract (model_name, method_name) from run identifier."""
+    for m in ["qlora", "dora", "lora", "fft"]:
+        if name.endswith(f"_{m}"):
+            return name[:-len(m)-1], m
+    return name, "unknown"
+
+def smooth_curve(values: list[float], weight: float = 0.8) -> list[float]:
+    """Exponential Moving Average (EMA) smoothing for noisy step loss curves."""
+    smoothed = []
+    last = None
+    for v in values:
+        if v is None or math.isnan(v):
+            smoothed.append(v)
+            continue
+        if last is None:
+            last = v
+        else:
+            last = last * weight + (1 - weight) * v
+        smoothed.append(last)
+    return smoothed
+
+def group_runs_by_model(runs: dict[str, list[dict]]) -> dict[str, dict[str, list[dict]]]:
+    """Organize flat runs dictionary into {model: {method: history}}."""
+    models = {}
+    for run_name, history in runs.items():
+        model, method = parse_run_name(run_name)
+        if model not in models:
+            models[model] = {}
+        models[model][method] = history
+    return models
+
+def _plot_faceted_metric(
+    runs: dict[str, list[dict]],
+    x_key: str,
+    x_label: str,
+    title: str,
+    save_path: str,
+    compute_flops: bool = False,
+    override_params: int | None = None
+):
+    """Plot metric curves organized by model in clean subplots with EMA smoothing."""
+    plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
+    models = group_runs_by_model(runs)
+    n_models = len(models)
+    if n_models == 0:
+        return
+
+    if n_models == 1:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        axes = [ax]
+        model_names = list(models.keys())
+    else:
+        cols = min(4, n_models)
+        rows = math.ceil(n_models / cols)
+        fig, axes = plt.subplots(rows, cols, figsize=(4.6 * cols, 3.8 * rows), squeeze=False)
+        axes = axes.flatten()
+        model_names = sorted(models.keys())
+
+    legend_handles = {}
+
+    for i, model in enumerate(model_names):
+        ax = axes[i]
+        methods = models[model]
+        params = override_params if override_params is not None else MODEL_PARAMS.get(model, 500_000_000)
+
+        for method in ["fft", "lora", "dora", "qlora"]:
+            if method not in methods:
+                continue
+            history = methods[method]
+            valid = [h for h in history if not math.isnan(h.get("loss", float("nan")))]
+            if not valid:
+                continue
+
+            if compute_flops:
+                x = [6 * params * h["tokens_seen"] for h in valid]
+            else:
+                x = [h[x_key] for h in valid]
+            y = [h["loss"] for h in valid]
+
+            color = METHOD_COLORS.get(method, "gray")
+            label = METHOD_LABELS.get(method, method.upper())
+
+            # Plot raw noisy loss with transparency and solid EMA trend line
+            ax.plot(x, y, color=color, alpha=0.22, linewidth=1)
+            y_smooth = smooth_curve(y, weight=0.8)
+            line, = ax.plot(x, y_smooth, color=color, linewidth=2, label=label)
+
+            if method not in legend_handles:
+                legend_handles[method] = line
+
+        param_str = f"{params / 1e9:.2f}B" if params >= 1e9 else f"{params / 1e6:.0f}M"
+        ax.set_title(f"{model} (~{param_str})", fontsize=11, fontweight="bold")
+        ax.set_xlabel(x_label, fontsize=9)
+        ax.set_ylabel("Loss (Cross-Entropy)", fontsize=9)
+        ax.tick_params(labelsize=8)
+
+    for j in range(len(model_names), len(axes)):
+        axes[j].axis("off")
+
+    handles = [legend_handles[m] for m in ["fft", "lora", "dora", "qlora"] if m in legend_handles]
+    labels = [METHOD_LABELS[m] for m in ["fft", "lora", "dora", "qlora"] if m in legend_handles]
+    if handles:
+        fig.legend(
+            handles, labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.02),
+            ncol=min(4, len(handles)),
+            frameon=True,
+            fontsize=10
+        )
+
+    fig.suptitle(title, fontsize=14, fontweight="bold", y=1.06)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
 
 def plot_loss_vs_tokens(runs: dict[str, list[dict]], save_path: str = "plots/fig1_loss_vs_tokens.png"):
-    plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
-    fig, ax = plt.subplots(figsize=(8, 5))
+    """Figure 1: Cross-entropy loss vs. tokens seen (Data / Sample Efficiency)."""
+    _plot_faceted_metric(
+        runs=runs,
+        x_key="tokens_seen",
+        x_label="Tokens Seen",
+        title="Fine-Tuning Loss vs. Tokens Seen (Data Efficiency)",
+        save_path=save_path
+    )
 
-    for key, r in runs.items():
-        tokens_seen = [l["tokens_seen"] for l in r]
-        loss = [l["loss"] for l in r]
-
-        ax.plot(tokens_seen, loss, label=key, linewidth=2)
-        ax.set_xlabel("Tokens Seen")
-        ax.set_ylabel("Loss")
-        ax.set_title("Loss vs. Tokens Seen")
-
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=300)
-    plt.close(fig)
 
 def plot_loss_vs_time(runs: dict[str, list[dict]], save_path: str = "plots/fig2_loss_vs_time.png"):
-    plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
-    fig, ax = plt.subplots(figsize=(8, 5))
+    """Figure 2: Cross-entropy loss vs. elapsed seconds (Wall-Clock Speed)."""
+    _plot_faceted_metric(
+        runs=runs,
+        x_key="elapsed_seconds",
+        x_label="Elapsed Seconds",
+        title="Fine-Tuning Loss vs. Elapsed Seconds (Wall-Clock Speed)",
+        save_path=save_path
+    )
 
-    for key, r in runs.items():
-        elapsed = [l["elapsed_seconds"] for l in r]
-        loss = [l["loss"] for l in r]
 
-        ax.plot(elapsed, loss, label=key, linewidth=2)
-        ax.set_xlabel("Elapsed Seconds")
-        ax.set_ylabel("Loss")
-        ax.set_title("Loss vs. Elapsed Seconds")
+def plot_loss_vs_compute(
+    runs: dict[str, list[dict]],
+    save_path: str = "plots/fig3_loss_vs_compute.png",
+    total_params: int | None = None
+):
+    """Figure 3: Cross-entropy loss vs. FLOPs using model-specific parameter counts."""
+    _plot_faceted_metric(
+        runs=runs,
+        x_key="tokens_seen",
+        x_label="FLOPs (6 × P_model × Tokens)",
+        title="Fine-Tuning Loss vs. Compute (FLOP Efficiency)",
+        save_path=save_path,
+        compute_flops=True,
+        override_params=total_params
+    )
 
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=300)
-    plt.close(fig)
-
-def plot_loss_vs_compute(runs: dict[str, list[dict]], save_path: str = "plots/fig3_loss_vs_compute.png", total_params: int = 494_032_768):
-    plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
-    fig, ax = plt.subplots(figsize=(8, 5))
-
-    for key, r in runs.items():
-        flops = [6 * total_params * l["tokens_seen"] for l in r]
-        loss = [l["loss"] for l in r]
-
-        ax.plot(flops, loss, label=key, linewidth=2)
-        ax.set_xlabel("FLOPs")
-        ax.set_ylabel("Loss")
-        ax.set_title("Loss vs. Compute")
-
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=300)
-    plt.close(fig)
 
 def plot_vram_comparison(runs: dict[str, list[dict]], save_path: str = "plots/fig4_vram_comparison.png"):
+    """Figure 4: Grouped horizontal bar chart of peak VRAM across models and methods."""
     plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
-    fig, ax = plt.subplots(figsize=(8, 5))
+    models_dict = group_runs_by_model(runs)
+    models = sorted(models_dict.keys())
+    methods = ["fft", "lora", "dora", "qlora"]
 
-    vrams = [max(l["peak_vram_mb"] for l in r) for r in runs.values()]
-    methods = list(runs.keys())
+    fig, ax = plt.subplots(figsize=(10, max(5, len(models) * 0.75)))
 
-    bars = ax.bar(methods, vrams, color="steelblue", width=0.4)
-    ax.set_xlabel("Method")
-    ax.set_ylabel("Peak VRAM (MB)")
-    ax.set_title("Peak GPU Memory by Method")
+    y = np.arange(len(models))
+    total_bar_height = 0.75
+    bar_height = total_bar_height / len(methods)
 
-    for bar in bars:
-        h = bar.get_height()
-        ax.annotate(f"{h:.1f} MB", xy=(bar.get_x() + bar.get_width() / 2, h),
-                    xytext=(0, 3), textcoords="offset points", ha='center', va='bottom')
+    for idx, method in enumerate(methods):
+        vrams = []
+        for model in models:
+            if method in models_dict[model]:
+                vrams.append(max(h.get("peak_vram_mb", 0) for h in models_dict[model][method]))
+            else:
+                vrams.append(0)
+
+        offset = (idx - (len(methods) - 1) / 2) * bar_height
+        bars = ax.barh(
+            y + offset,
+            vrams,
+            height=bar_height * 0.9,
+            label=METHOD_LABELS[method],
+            color=METHOD_COLORS[method],
+            edgecolor="none"
+        )
+
+        for bar, val in zip(bars, vrams):
+            if val > 0:
+                ax.text(
+                    val + 150,
+                    bar.get_y() + bar.get_height() / 2,
+                    f"{val:.0f} MB" if val < 10000 else f"{val/1024:.1f} GB",
+                    va="center",
+                    ha="left",
+                    fontsize=7.5,
+                    color="#333333"
+                )
+
+    # Reference limit line for 24GB RTX 4090
+    ax.axvline(24576, color="#e41a1c", linestyle="--", linewidth=1.2, alpha=0.7)
+    ax.text(24576, -0.4, " 24 GB GPU Limit (RTX 4090)", color="#e41a1c", fontsize=8.5, va="bottom", ha="left")
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(models, fontsize=9, fontweight="bold")
+    ax.invert_yaxis()
+    ax.set_xlabel("Peak GPU Memory (MB)", fontsize=10)
+    ax.set_title("Peak VRAM Comparison by Model & Adaptation Method", fontsize=12, fontweight="bold", pad=15)
+    ax.legend(loc="lower right", frameon=True, fontsize=9)
+    ax.set_xlim(0, 27500)
+
     fig.tight_layout()
-    fig.savefig(save_path, dpi=300)
+    fig.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
-def plot_all(log_files: dict[str, str], save_path: str = "plots/"):
-    runs = {}
 
+def plot_all(log_files: dict[str, str], save_path: str = "plots/"):
+    """Load runs from files and generate the complete set of 4 benchmark figures."""
+    runs = {}
     for name, log_path in log_files.items():
         runs[name] = load_log(log_path)
 
     if runs:
-        plot_loss_vs_tokens(runs, f"{save_path}fig1_loss_vs_tokens.png")
-        plot_loss_vs_time(runs, f"{save_path}fig2_loss_vs_time.png")
-        plot_loss_vs_compute(runs, f"{save_path}fig3_loss_vs_compute.png")
-        plot_vram_comparison(runs, f"{save_path}fig4_vram_comparison.png")
+        os.makedirs(save_path, exist_ok=True)
+        plot_loss_vs_tokens(runs, os.path.join(save_path, "fig1_loss_vs_tokens.png"))
+        plot_loss_vs_time(runs, os.path.join(save_path, "fig2_loss_vs_time.png"))
+        plot_loss_vs_compute(runs, os.path.join(save_path, "fig3_loss_vs_compute.png"))
+        plot_vram_comparison(runs, os.path.join(save_path, "fig4_vram_comparison.png"))
 
 
 if __name__ == "__main__":
-    import glob
     os.makedirs("plots", exist_ok=True)
     all_logs = sorted(glob.glob("logs/*.jsonl"))
     if all_logs:
         log_mapping = {os.path.basename(f).replace(".jsonl", ""): f for f in all_logs}
         print(f"Plotting comparisons across {len(log_mapping)} run(s) found in logs/...")
         plot_all(log_mapping)
+        print("Successfully generated all benchmark plots in plots/!")
     else:
-        print("No log files found in logs/.")
+        print("No log files found in logs/.")

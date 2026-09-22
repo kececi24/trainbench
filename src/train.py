@@ -60,6 +60,8 @@ def train(config, enable_profiling: bool = False):
     tokenizer = AutoTokenizer.from_pretrained(config.model.name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    if getattr(model.config, "pad_token_id", None) is None:
+        model.config.pad_token_id = tokenizer.pad_token_id
 
     dataset_name = getattr(config.data, "dataset_name", getattr(config.data, "name", "yahma/alpaca-cleaned"))
     train_samples = getattr(config.data, "train_samples", 500)
