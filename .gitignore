@@ -1,5 +1,79 @@
-/logs
-/plots
-/results
-/src/pycache
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Project outputs, logs, and artifacts
+outputs/
+output/
+runs/
+results/
+logs/
+*.log
+
+# Checkpoints and models (RTX 4090 training weights)
+checkpoints/
+weights/
+*.pt
+*.pth
+*.bin
+*.onnx
+*.safetensors
+*.ckpt
+
+# Temporary / cache files
+.cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor / IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Orchestrator & Hugging Face caches
+plots/
+data/
+*.jsonl
+
+# Archive files
 *.zip
+*.tar.gz
+*.tgz
+*.rar
+*.7z
