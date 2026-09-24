@@ -53,7 +53,10 @@ SKIP_EXISTING=false
 SKIP_EVAL=false
 SKIP_SVD=false
 
-export HF_HOME="$(pwd)/data/huggingface_cache"
+if [[ -f .env ]]; then
+    source .env
+fi
+#export HF_HOME="${HF_HOME:-$(pwd)/data/huggingface_cache}"
 
 # Parse command-line flags
 while [[ $# -gt 0 ]]; do
@@ -185,9 +188,10 @@ for method in "${METHODS[@]}"; do
         RUN_DIST_MODE="Single-GPU"
         if [[ "$NUM_GPUS" -gt 1 ]]; then
             # Auto-enable FSDP for large model FFT (7B, 8B, 13B, 14B) or if requested
+            # Note: in accelerate launch, --use_fsdp and --multi_gpu are mutually exclusive!
             if [[ "$FORCE_FSDP" == true || ( "$method" == "fft" && "$config_name" =~ (7b|8b|13b|14b) ) ]]; then
                 RUN_DIST_MODE="Multi-GPU (FSDP - $NUM_GPUS GPUs)"
-                LAUNCH_CMD=("$PYTHON_BIN" "-m" "accelerate.commands.launch" "--multi_gpu" "--num_processes" "$NUM_GPUS" "--use_fsdp" "--fsdp_auto_wrap_policy" "TRANSFORMER_BASED_WRAP")
+                LAUNCH_CMD=("$PYTHON_BIN" "-m" "accelerate.commands.launch" "--use_fsdp" "--num_processes" "$NUM_GPUS" "--fsdp_auto_wrap_policy" "TRANSFORMER_BASED_WRAP")
             else
                 RUN_DIST_MODE="Multi-GPU (DDP - $NUM_GPUS GPUs)"
                 LAUNCH_CMD=("$PYTHON_BIN" "-m" "accelerate.commands.launch" "--multi_gpu" "--num_processes" "$NUM_GPUS")

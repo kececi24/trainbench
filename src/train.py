@@ -73,8 +73,9 @@ def train(config, enable_profiling: bool = False):
         )
         model = get_peft_model(model, peft_config)
 
-    # Move model to device if not mapped
-    if device_map is None and quant_config is None:
+    # Move model to device if not mapped (skip for FSDP so parameters shard directly without VRAM spike)
+    is_fsdp = str(accelerator.distributed_type).upper().endswith("FSDP")
+    if device_map is None and quant_config is None and not is_fsdp:
         model.to(device)
 
     # 5. Tokenizer & Data Pipeline
@@ -183,15 +184,25 @@ def train(config, enable_profiling: bool = False):
     # Synchronize processes before saving
     accelerator.wait_for_everyone()
 
-    # Save Model Checkpoint & Tokenizer (Rank 0 unwraps model)
+    # Save Model Checkpoint & Tokenizer
+    checkpoint_dir = getattr(config.tracking, "checkpoint_dir", f"checkpoints/{config.experiment.name}")
     if is_main:
-        checkpoint_dir = getattr(config.tracking, "checkpoint_dir", f"checkpoints/{config.experiment.name}")
         os.makedirs(checkpoint_dir, exist_ok=True)
         print(f"\n[Checkpoint] Saving weights to: {checkpoint_dir}...")
-        unwrapped_model = accelerator.unwrap_model(model)
-        unwrapped_model.save_pretrained(checkpoint_dir)
-        tokenizer.save_pretrained(checkpoint_dir)
-        print(f"[Checkpoint] Weights and tokenizer successfully saved to: {checkpoint_dir}")
+
+    accelerator.wait_for_everyone()
+    unwrapped_model = accelerator.unwrap_model(model)
+    if str(accelerator.distributed_type).upper().endswith("FSDP"):
+        state_dict = accelerator.get_state_dict(model)
+        if is_main:
+            unwrapped_model.save_pretrained(checkpoint_dir, state_dict=state_dict)
+            tokenizer.save_pretrained(checkpoint_dir)
+            print(f"[Checkpoint] Weights and tokenizer successfully saved to: {checkpoint_dir}")
+    else:
+        if is_main:
+            unwrapped_model.save_pretrained(checkpoint_dir)
+            tokenizer.save_pretrained(checkpoint_dir)
+            print(f"[Checkpoint] Weights and tokenizer successfully saved to: {checkpoint_dir}")
 
 
 def dict_to_namespace(d):
