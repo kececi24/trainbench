@@ -73,6 +73,12 @@ def train(config, enable_profiling: bool = False):
         )
         model = get_peft_model(model, peft_config)
 
+    # Enable gradient checkpointing if configured (reduces activation memory overhead)
+    if getattr(config.training, "gradient_checkpointing", False) or getattr(config.model, "gradient_checkpointing", False):
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
+        model.gradient_checkpointing_enable()
+
     # Move model to device if not mapped (skip for FSDP so parameters shard directly without VRAM spike)
     is_fsdp = str(accelerator.distributed_type).upper().endswith("FSDP")
     if device_map is None and quant_config is None and not is_fsdp:

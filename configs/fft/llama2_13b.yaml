@@ -17,5 +17,6 @@ training:
   max_steps: 100
   warmup_steps: 10
   gradient_clip: 1.0
+  gradient_checkpointing: true
 tracking:
   log_dir: logs

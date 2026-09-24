@@ -56,7 +56,8 @@ SKIP_SVD=false
 if [[ -f .env ]]; then
     source .env
 fi
-#export HF_HOME="${HF_HOME:-$(pwd)/data/huggingface_cache}"
+export HF_HOME="${HF_HOME:-$(pwd)/data/huggingface_cache}"
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 # Parse command-line flags
 while [[ $# -gt 0 ]]; do
@@ -187,9 +188,14 @@ for method in "${METHODS[@]}"; do
         # Determine Multi-GPU Execution Mode (DDP vs. FSDP)
         RUN_DIST_MODE="Single-GPU"
         if [[ "$NUM_GPUS" -gt 1 ]]; then
-            # Auto-enable FSDP for large model FFT (7B, 8B, 13B, 14B) or if requested
-            # Note: in accelerate launch, --use_fsdp and --multi_gpu are mutually exclusive!
-            if [[ "$FORCE_FSDP" == true || ( "$method" == "fft" && "$config_name" =~ (7b|8b|13b|14b) ) ]]; then
+            # Auto-enable FSDP for:
+            # 1. FFT on 7B+ models (optimizer state is ~4x model size)
+            # 2. 16-bit LoRA/DoRA on 13B/14B models (base model is ~29.5GB, saturating single 32GB GPUs in DDP)
+            # 3. Explicitly requested with --use-fsdp
+            IS_LARGE_FFT=$([[ "$method" == "fft" && "$config_name" =~ (7b|8b|13b|14b) ]] && echo true || echo false)
+            IS_LARGE_16BIT_PEFT=$([[ ( "$method" == "lora" || "$method" == "dora" ) && "$config_name" =~ (13b|14b) ]] && echo true || echo false)
+
+            if [[ "$FORCE_FSDP" == true || "$IS_LARGE_FFT" == true || "$IS_LARGE_16BIT_PEFT" == true ]]; then
                 RUN_DIST_MODE="Multi-GPU (FSDP - $NUM_GPUS GPUs)"
                 LAUNCH_CMD=("$PYTHON_BIN" "-m" "accelerate.commands.launch" "--use_fsdp" "--num_processes" "$NUM_GPUS" "--fsdp_auto_wrap_policy" "TRANSFORMER_BASED_WRAP")
             else
