@@ -4,6 +4,10 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 
+import sys
+sys.path.insert(0, os.path.abspath("."))
+sys.path.insert(0, os.path.abspath("src"))
+
 try:
     from analysis import load_log
 except ImportError:
@@ -207,7 +211,7 @@ def plot_vram_comparison(runs: dict[str, list[dict]], save_path: str = "plots/fi
     models = sorted(models_dict.keys())
     methods = ["fft", "lora", "dora", "qlora"]
 
-    fig, ax = plt.subplots(figsize=(10, max(5, len(models) * 0.75)))
+    fig, ax = plt.subplots(figsize=(11, max(5.5, len(models) * 0.72)))
 
     y = np.arange(len(models))
     total_bar_height = 0.75
@@ -234,7 +238,7 @@ def plot_vram_comparison(runs: dict[str, list[dict]], save_path: str = "plots/fi
         for bar, val in zip(bars, vrams):
             if val > 0:
                 ax.text(
-                    val + 150,
+                    val + 180,
                     bar.get_y() + bar.get_height() / 2,
                     f"{val:.0f} MB" if val < 10000 else f"{val/1024:.1f} GB",
                     va="center",
@@ -243,17 +247,21 @@ def plot_vram_comparison(runs: dict[str, list[dict]], save_path: str = "plots/fi
                     color="#333333"
                 )
 
-    # Reference limit line for 24GB RTX 4090
-    ax.axvline(24576, color="#e41a1c", linestyle="--", linewidth=1.2, alpha=0.7)
-    ax.text(24576, -0.4, " 24 GB GPU Limit (RTX 4090)", color="#e41a1c", fontsize=8.5, va="bottom", ha="left")
+    # Reference limit line for 24GB RTX 4090 (24,576 MB)
+    ax.axvline(24576, color="#e41a1c", linestyle="--", linewidth=1.2, alpha=0.75)
+    ax.text(24576, -0.4, " 24 GB Limit (RTX 4090)", color="#e41a1c", fontsize=8.5, va="bottom", ha="left", fontweight="bold")
+
+    # Reference limit line for 32GB RTX 5090 (32,768 MB)
+    ax.axvline(32768, color="#0072b2", linestyle="--", linewidth=1.4, alpha=0.85)
+    ax.text(32768, -0.4, " 32 GB Limit (RTX 5090)", color="#0072b2", fontsize=8.5, va="bottom", ha="left", fontweight="bold")
 
     ax.set_yticks(y)
     ax.set_yticklabels(models, fontsize=9, fontweight="bold")
     ax.invert_yaxis()
     ax.set_xlabel("Peak GPU Memory (MB)", fontsize=10)
     ax.set_title("Peak VRAM Comparison by Model & Adaptation Method", fontsize=12, fontweight="bold", pad=15)
-    ax.legend(loc="lower right", frameon=True, fontsize=9)
-    ax.set_xlim(0, 27500)
+    ax.legend(loc="lower right", frameon=True, fontsize=9.5, framealpha=0.92)
+    ax.set_xlim(0, 37500)
 
     fig.tight_layout()
     fig.savefig(save_path, dpi=300, bbox_inches="tight")
@@ -275,12 +283,43 @@ def plot_all(log_files: dict[str, str], save_path: str = "plots/"):
 
 
 if __name__ == "__main__":
-    os.makedirs("plots", exist_ok=True)
-    all_logs = sorted(glob.glob("logs/*.jsonl"))
-    if all_logs:
-        log_mapping = {os.path.basename(f).replace(".jsonl", ""): f for f in all_logs}
-        print(f"Plotting comparisons across {len(log_mapping)} run(s) found in logs/...")
-        plot_all(log_mapping)
-        print("Successfully generated all benchmark plots in plots/!")
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate benchmark plots for LLM fine-tuning runs.")
+    parser.add_argument("--logs-dir", type=str, default=None, help="Directory containing .jsonl run logs (e.g. logs or results5090/logs).")
+    parser.add_argument("--save-dir", type=str, default=None, help="Directory to save generated PNG plots (e.g. plots or plots5090).")
+    args = parser.parse_args()
+
+    if args.logs_dir:
+        target_save = args.save_dir or ("plots5090" if "5090" in args.logs_dir else "plots")
+        all_logs = sorted(glob.glob(os.path.join(args.logs_dir, "*.jsonl")))
+        if all_logs:
+            log_mapping = {os.path.basename(f).replace(".jsonl", ""): f for f in all_logs}
+            print(f"Plotting comparisons across {len(log_mapping)} run(s) from {args.logs_dir} to {target_save}/...")
+            plot_all(log_mapping, save_path=target_save)
+            print(f"Successfully generated all benchmark plots in {target_save}/!")
+        else:
+            print(f"No log files found in {args.logs_dir}.")
     else:
-        print("No log files found in logs/.")
+        generated_any = False
+        # 1. Generate for results5090/logs if present
+        if os.path.exists("results5090/logs"):
+            logs_5090 = sorted(glob.glob("results5090/logs/*.jsonl"))
+            if logs_5090:
+                log_map_5090 = {os.path.basename(f).replace(".jsonl", ""): f for f in logs_5090}
+                print(f"Plotting comparisons across {len(log_map_5090)} run(s) from results5090/logs to plots5090/...")
+                plot_all(log_map_5090, save_path="plots5090")
+                print("Successfully generated all benchmark plots in plots5090/!")
+                generated_any = True
+
+        # 2. Generate for logs/ if present
+        if os.path.exists("logs"):
+            logs_default = sorted(glob.glob("logs/*.jsonl"))
+            if logs_default:
+                log_map_default = {os.path.basename(f).replace(".jsonl", ""): f for f in logs_default}
+                print(f"Plotting comparisons across {len(log_map_default)} run(s) from logs to plots/...")
+                plot_all(log_map_default, save_path="plots")
+                print("Successfully generated all benchmark plots in plots/!")
+                generated_any = True
+
+        if not generated_any:
+            print("No log files found in logs/ or results5090/logs.")

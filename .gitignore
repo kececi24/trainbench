@@ -31,12 +31,14 @@ env/
 ENV/
 env.bak/
 venv.bak/
+.env
 
 # Project outputs, logs, and artifacts
 outputs/
 output/
 runs/
 results/
+results*/
 logs/
 *.log
 
@@ -68,6 +70,7 @@ Thumbs.db
 
 # Orchestrator & Hugging Face caches
 plots/
+plots*/
 data/
 *.jsonl
 

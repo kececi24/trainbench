@@ -2,6 +2,7 @@
 # ==============================================================================
 # Benchmarking LLM Fine-Tuning Efficiency: Automated Experiment Orchestrator
 # Compatible with: Ubuntu / Debian / Linux environments
+# Supports: Single-GPU, Multi-GPU DDP, and Multi-GPU FSDP (for 7B/14B models)
 #
 # Usage:
 #   bash scripts/orchestrator.sh [OPTIONS]
@@ -9,6 +10,8 @@
 # Options:
 #   --method <fft|lora|dora|qlora|all>   Target fine-tuning method (default: all)
 #   --model  <model_id|all>              Target model id, e.g. qwen2.5_0.5b (default: all)
+#   --num-gpus <N>                       Number of GPUs to use per run (default: 1)
+#   --use-fsdp                           Force FSDP mode (auto-enabled for 7B/14B FFT)
 #   --profile                            Enable CUPTI/PyTorch profiling on runs
 #   --skip-existing                      Skip runs that already have completed logs
 #   --skip-eval                          Skip held-out and forgetting evaluation
@@ -31,9 +34,20 @@ if ! command -v "$PYTHON_BIN" &> /dev/null; then
     PYTHON_BIN="python"
 fi
 
+# Detect system available GPUs via nvidia-smi
+DETECTED_GPUS=1
+if command -v nvidia-smi &> /dev/null; then
+    COUNT=$(nvidia-smi --query-gpu=count --format=csv,noheader 2>/dev/null | head -n 1 || echo 1)
+    if [[ "$COUNT" =~ ^[0-9]+$ ]]; then
+        DETECTED_GPUS=$COUNT
+    fi
+fi
+
 # Default parameters
 TARGET_METHOD="all"
 TARGET_MODEL="all"
+NUM_GPUS=1
+FORCE_FSDP=false
 ENABLE_PROFILE=""
 SKIP_EXISTING=false
 SKIP_EVAL=false
@@ -52,6 +66,18 @@ while [[ $# -gt 0 ]]; do
             TARGET_MODEL="$2"
             shift 2
             ;;
+        --num-gpus)
+            if [[ "$2" == "auto" || "$2" == "all" ]]; then
+                NUM_GPUS=$DETECTED_GPUS
+            else
+                NUM_GPUS="$2"
+            fi
+            shift 2
+            ;;
+        --use-fsdp)
+            FORCE_FSDP=true
+            shift
+            ;;
         --profile)
             ENABLE_PROFILE="--profile"
             shift
@@ -69,7 +95,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help)
-            head -n 18 "$0" | tail -n 15
+            head -n 20 "$0" | tail -n 17
             exit 0
             ;;
         *)
@@ -102,6 +128,7 @@ fi
 echo -e "${BLUE}============================================================${NC}"
 echo -e "${BLUE} LLM Fine-Tuning Efficiency Benchmark Orchestrator (Ubuntu)  ${NC}"
 echo -e "${BLUE} Python:      $($PYTHON_BIN --version 2>&1)${NC}"
+echo -e "${BLUE} GPUs Used:   ${NUM_GPUS} (Detected: ${DETECTED_GPUS})${NC}"
 echo -e "${BLUE} Methods:     ${METHODS[*]}${NC}"
 echo -e "${BLUE} Model:       ${TARGET_MODEL}${NC}"
 echo -e "${BLUE} Profiler:    ${ENABLE_PROFILE:-Disabled}${NC}"
@@ -154,22 +181,38 @@ for method in "${METHODS[@]}"; do
             continue
         fi
 
+        # Determine Multi-GPU Execution Mode (DDP vs. FSDP)
+        RUN_DIST_MODE="Single-GPU"
+        if [[ "$NUM_GPUS" -gt 1 ]]; then
+            # Auto-enable FSDP for large model FFT (7B, 8B, 13B, 14B) or if requested
+            if [[ "$FORCE_FSDP" == true || ( "$method" == "fft" && "$config_name" =~ (7b|8b|13b|14b) ) ]]; then
+                RUN_DIST_MODE="Multi-GPU (FSDP - $NUM_GPUS GPUs)"
+                LAUNCH_CMD=("$PYTHON_BIN" "-m" "accelerate.commands.launch" "--multi_gpu" "--num_processes" "$NUM_GPUS" "--use_fsdp" "--fsdp_auto_wrap_policy" "TRANSFORMER_BASED_WRAP")
+            else
+                RUN_DIST_MODE="Multi-GPU (DDP - $NUM_GPUS GPUs)"
+                LAUNCH_CMD=("$PYTHON_BIN" "-m" "accelerate.commands.launch" "--multi_gpu" "--num_processes" "$NUM_GPUS")
+            fi
+        else
+            LAUNCH_CMD=("$PYTHON_BIN")
+        fi
+
         echo -e "${GREEN}------------------------------------------------------------${NC}"
         echo -e "${GREEN}[RUN #${TOTAL_RUNS}] Launching: Method=${method^^} | Model=${config_name}${NC}"
+        echo -e "${GREEN}Mode:       ${RUN_DIST_MODE}${NC}"
         echo -e "${GREEN}Config:     $config_file${NC}"
         echo -e "${GREEN}Checkpoint: $CHECKPOINT_DIR${NC}"
         echo -e "${GREEN}------------------------------------------------------------${NC}"
 
         RUN_START=$(date +%s)
 
-        # 1. Execute training run (saves logs & checkpoints)
-        if $PYTHON_BIN src/train.py --config "$config_file" $ENABLE_PROFILE; then
+        # 1. Execute training run
+        if "${LAUNCH_CMD[@]}" src/train.py --config "$config_file" $ENABLE_PROFILE; then
             RUN_END=$(date +%s)
             DURATION=$((RUN_END - RUN_START))
             echo -e "${GREEN}[SUCCESS] Training finished for $RUN_NAME in ${DURATION}s.${NC}"
             SUCCESSFUL_RUNS=$((SUCCESSFUL_RUNS + 1))
 
-            # 2. Run held-out evaluation & catastrophic forgetting
+            # 2. Run held-out evaluation & catastrophic forgetting (inference on single device)
             if [[ "$SKIP_EVAL" != true && -n "$BASE_MODEL" ]]; then
                 echo -e "${BLUE}[Evaluation] Running held-out eval and forgetting on $RUN_NAME...${NC}"
                 EVAL_JSON="results/${RUN_NAME}_eval.json"
