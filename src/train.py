@@ -73,6 +73,10 @@ def train(config, enable_profiling: bool = False):
         )
         model = get_peft_model(model, peft_config)
 
+    # Ensure uniform parameter dtype for FSDP sharding (casts PEFT float32 adapter params to model dtype)
+    if quant_config is None:
+        model.to(dtype)
+
     # Enable gradient checkpointing if configured (reduces activation memory overhead)
     if getattr(config.training, "gradient_checkpointing", False) or getattr(config.model, "gradient_checkpointing", False):
         if hasattr(model, "enable_input_require_grads"):
