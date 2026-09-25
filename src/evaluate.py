@@ -9,13 +9,28 @@ Roadmap Sections 32 & 33:
 """
 
 import math
+import os
+import gc
 import torch
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 from datasets import load_dataset
 
-from data_accounting import InstructionDataset, collate_fn
+from data_accounting import InstructionDataset, collate_fn, instruction_split_specs
+
+
+def load_finetuned_model(base_model_name: str, checkpoint_path: str | None,
+                         dtype, device: str):
+    """Load either a PEFT adapter, an FFT checkpoint, or the base model."""
+    if checkpoint_path is None:
+        return AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=dtype, device_map=device)
+    if not os.path.isdir(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_path}")
+    if os.path.isfile(os.path.join(checkpoint_path, "adapter_config.json")):
+        base_model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=dtype, device_map=device)
+        return PeftModel.from_pretrained(base_model, checkpoint_path)
+    return AutoModelForCausalLM.from_pretrained(checkpoint_path, torch_dtype=dtype, device_map=device)
 
 
 def evaluate_dataset(model, dataloader, device: str = "cuda") -> dict:
@@ -55,13 +70,8 @@ def evaluate_general_language(model, tokenizer, device: str = "cuda", num_sample
     to measure baseline language capability retention.
     """
     print("Loading general corpus samples for forgetting assessment...")
-    try:
-        raw_general = load_dataset("wikitext", "wikitext-2-raw-v1", split=f"test[:{num_samples}]")
-        text_column = "text"
-    except Exception:
-        # Fallback to a general subset if network/dataset has issues
-        raw_general = load_dataset("yahma/alpaca-cleaned", split=f"train[1000:1000+{num_samples}]")
-        text_column = "instruction"
+    raw_general = load_dataset("wikitext", "wikitext-2-raw-v1", split=f"test[:{num_samples}]")
+    text_column = "text"
 
     # Filter out empty texts
     texts = [item[text_column] for item in raw_general if item.get(text_column, "").strip()]
@@ -79,7 +89,7 @@ def evaluate_general_language(model, tokenizer, device: str = "cuda", num_sample
 
             outputs = model(input_ids=input_ids, labels=input_ids)
             loss = outputs.loss
-            num_tokens = input_ids.shape[1]
+            num_tokens = input_ids.shape[1] - 1
 
             total_loss += loss.item() * num_tokens
             total_tokens += num_tokens
@@ -100,7 +110,7 @@ def compute_forgetting_metrics(base_model_name: str, adapter_checkpoint_path: st
     to compute catastrophic forgetting metrics (Section 32 & 33).
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+    dtype = torch.float32 if device == "cpu" else (torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16)
 
     print(f"\n[Forgetting Evaluation] Loading base model: {base_model_name}")
     tokenizer = AutoTokenizer.from_pretrained(base_model_name)
@@ -114,8 +124,15 @@ def compute_forgetting_metrics(base_model_name: str, adapter_checkpoint_path: st
     print(f"Base Model -> General Loss: {base_eval['general_loss']} | General PPL: {base_eval['general_ppl']}")
 
     if adapter_checkpoint_path is not None:
-        print(f"Loading Fine-Tuned Adapter from: {adapter_checkpoint_path}")
-        ft_model = PeftModel.from_pretrained(base_model, adapter_checkpoint_path)
+        print(f"Loading Fine-Tuned Checkpoint from: {adapter_checkpoint_path}")
+        if os.path.isfile(os.path.join(adapter_checkpoint_path, "adapter_config.json")):
+            ft_model = PeftModel.from_pretrained(base_model, adapter_checkpoint_path)
+        else:
+            del base_model
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            ft_model = load_finetuned_model(base_model_name, adapter_checkpoint_path, dtype, device)
     else:
         ft_model = base_model
 
@@ -144,17 +161,21 @@ def compute_forgetting_metrics(base_model_name: str, adapter_checkpoint_path: st
     return results
 
 
-def run_evaluation(base_model_name: str, adapter_checkpoint_path: str = None, dataset_name: str = "yahma/alpaca-cleaned", output_json: str = None) -> dict:
+def run_evaluation(base_model_name: str, adapter_checkpoint_path: str = None,
+                   dataset_name: str = "yahma/alpaca-cleaned", output_json: str = None,
+                   train_samples: int = 1000, val_samples: int = 50,
+                   max_length: int = 256) -> dict:
     """
     Executes full evaluation:
     1. Held-out validation loss & perplexity on target instruction task.
     2. Catastrophic forgetting assessment on general language capability.
     Saves results to output_json if provided.
     """
-    import os
     import json
+    if adapter_checkpoint_path is not None and not os.path.isdir(adapter_checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint directory not found: {adapter_checkpoint_path}")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+    dtype = torch.float32 if device == "cpu" else (torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16)
 
     print(f"\n[Evaluation] Loading model: {base_model_name}")
     tokenizer = AutoTokenizer.from_pretrained(base_model_name)
@@ -163,25 +184,27 @@ def run_evaluation(base_model_name: str, adapter_checkpoint_path: str = None, da
 
     # 1. Target Validation Performance (Held-Out Split)
     print(f"[Evaluation] Evaluating held-out validation set from {dataset_name}...")
+    model = None
     try:
-        raw_val = load_dataset(dataset_name, split="train[450:500]")
-        val_dataset = InstructionDataset(raw_val, tokenizer, max_length=256)
+        _, val_split = instruction_split_specs(train_samples, val_samples)
+        raw_val = load_dataset(dataset_name, split=val_split)
+        val_dataset = InstructionDataset(raw_val, tokenizer, max_length=max_length)
+        if not val_dataset:
+            raise ValueError("Validation split contains no usable responses")
         val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False, collate_fn=lambda b: collate_fn(b, tokenizer.pad_token_id))
 
-        if adapter_checkpoint_path is not None and os.path.exists(adapter_checkpoint_path):
-            adapter_config = os.path.join(adapter_checkpoint_path, "adapter_config.json")
-            if os.path.exists(adapter_config):
-                base_model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=dtype, device_map=device)
-                model = PeftModel.from_pretrained(base_model, adapter_checkpoint_path)
-            else:
-                model = AutoModelForCausalLM.from_pretrained(adapter_checkpoint_path, torch_dtype=dtype, device_map=device)
-        else:
-            model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=dtype, device_map=device)
+        model = load_finetuned_model(base_model_name, adapter_checkpoint_path, dtype, device)
 
         target_metrics = evaluate_dataset(model, val_loader, device=device)
     except Exception as e:
         print(f"[Evaluation Warning] Could not evaluate target validation set: {e}")
         target_metrics = {"val_loss": None, "val_ppl": None, "eval_tokens": 0}
+    finally:
+        if model is not None:
+            del model
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     # 2. Catastrophic Forgetting
     print(f"[Evaluation] Measuring catastrophic forgetting...")
@@ -216,11 +239,17 @@ if __name__ == "__main__":
     parser.add_argument("--adapter", type=str, default=None, help="Path to fine-tuned checkpoint / adapter")
     parser.add_argument("--dataset", type=str, default="yahma/alpaca-cleaned", help="Target evaluation dataset")
     parser.add_argument("--output-json", type=str, default=None, help="Path to save results JSON")
+    parser.add_argument("--train-samples", type=int, default=1000, help="Number of training rows before validation starts")
+    parser.add_argument("--val-samples", type=int, default=50, help="Number of held-out validation rows")
+    parser.add_argument("--max-length", type=int, default=256, help="Validation sequence length")
 
     args = parser.parse_args()
     run_evaluation(
         base_model_name=args.model,
         adapter_checkpoint_path=args.adapter,
         dataset_name=args.dataset,
-        output_json=args.output_json
+        output_json=args.output_json,
+        train_samples=args.train_samples,
+        val_samples=args.val_samples,
+        max_length=args.max_length,
     )

@@ -177,12 +177,17 @@ for method in "${METHODS[@]}"; do
 
         # Extract base model name from yaml config
         BASE_MODEL=$($PYTHON_BIN -c "import yaml; print(yaml.safe_load(open('$config_file'))['model']['name'])" 2>/dev/null || echo "")
+        TRAIN_SAMPLES=$($PYTHON_BIN -c "import yaml; print(yaml.safe_load(open('$config_file'))['data'].get('train_samples', 500))")
+        VAL_SAMPLES=$($PYTHON_BIN -c "import yaml; print(yaml.safe_load(open('$config_file'))['data'].get('val_samples', 50))")
+        MAX_LENGTH=$($PYTHON_BIN -c "import yaml; print(yaml.safe_load(open('$config_file'))['data']['max_length'])")
 
-        # Check if already completed
-        if [[ "$SKIP_EXISTING" == true && -s "$LOG_PATH" ]]; then
-            echo -e "${YELLOW}[SKIP] Run $RUN_NAME already completed at $LOG_PATH.${NC}"
-            SUCCESSFUL_RUNS=$((SUCCESSFUL_RUNS + 1))
-            continue
+        # A nonempty log may belong to an interrupted run; require its final step and checkpoint.
+        if [[ "$SKIP_EXISTING" == true && -s "$LOG_PATH" && -d "$CHECKPOINT_DIR" ]]; then
+            if "$PYTHON_BIN" -c 'import json, sys, yaml; rows=open(sys.argv[1], encoding="utf-8").read().splitlines(); last=json.loads(rows[-1]); cfg=yaml.safe_load(open(sys.argv[2], encoding="utf-8")); sys.exit(0 if last["step"] >= cfg["training"]["max_steps"] and last.get("val_loss") is not None else 1)' "$LOG_PATH" "$config_file" 2>/dev/null; then
+                echo -e "${YELLOW}[SKIP] Run $RUN_NAME already completed at $LOG_PATH.${NC}"
+                SUCCESSFUL_RUNS=$((SUCCESSFUL_RUNS + 1))
+                continue
+            fi
         fi
 
         # Determine Multi-GPU Execution Mode (DDP vs. FSDP)
@@ -226,7 +231,7 @@ for method in "${METHODS[@]}"; do
             if [[ "$SKIP_EVAL" != true && -n "$BASE_MODEL" ]]; then
                 echo -e "${BLUE}[Evaluation] Running held-out eval and forgetting on $RUN_NAME...${NC}"
                 EVAL_JSON="results/${RUN_NAME}_eval.json"
-                $PYTHON_BIN src/evaluate.py --model "$BASE_MODEL" --adapter "$CHECKPOINT_DIR" --output-json "$EVAL_JSON" || echo -e "${YELLOW}[Warning] Evaluation failed.${NC}"
+                $PYTHON_BIN src/evaluate.py --model "$BASE_MODEL" --adapter "$CHECKPOINT_DIR" --train-samples "$TRAIN_SAMPLES" --val-samples "$VAL_SAMPLES" --max-length "$MAX_LENGTH" --output-json "$EVAL_JSON" || echo -e "${YELLOW}[Warning] Evaluation failed.${NC}"
             fi
 
             # 3. Run weight-space SVD and rank analysis (for PEFT methods)

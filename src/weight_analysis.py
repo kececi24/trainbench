@@ -3,7 +3,7 @@ Module 4: Weight-Space & Representation SVD Analysis.
 
 Roadmap Section 26:
 - For FFT:  Delta W = W_FT - W_0
-- For LoRA: Delta W = (alpha / r) * (B @ A)
+- For LoRA/DoRA: Delta W = W_merged - W_0 (includes DoRA magnitude)
 - Computes:
     - Frobenius Norm: ||Delta W||_F
     - Spectral Norm:  sigma_max = S_0
@@ -83,26 +83,27 @@ def compute_update_cosine_similarity(delta_w1: torch.Tensor, delta_w2: torch.Ten
     return round(cos_sim, 4)
 
 
-def extract_lora_delta_w(peft_model, target_module_name: str = "layers.0.self_attn.q_proj") -> torch.Tensor:
-    """
-    Extracts the analytical low-rank update Delta W = (alpha / r) * (B @ A) from a PeftModel.
-    """
-    scaling = None
-    lora_A = None
-    lora_B = None
-
+def extract_adapter_update(peft_model, target_module_name: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """Get the effective update through PEFT's merge, including DoRA magnitude."""
     for name, module in peft_model.named_modules():
-        if target_module_name in name and hasattr(module, "lora_A") and hasattr(module, "lora_B"):
-            scaling = module.scaling["default"]
-            lora_A = module.lora_A["default"].weight.data  # [r, d_in]
-            lora_B = module.lora_B["default"].weight.data  # [d_out, r]
-            break
+        if name == target_module_name and hasattr(module, "lora_A"):
+            if module.merged:
+                raise ValueError(f"Adapter module is already merged: {name}")
+            base_layer = module.get_base_layer()
+            w0 = base_layer.weight.detach().float().cpu().clone()
+            try:
+                module.merge()
+                delta_w = base_layer.weight.detach().float().cpu() - w0
+            finally:
+                if module.merged:
+                    module.unmerge()
+            return delta_w, w0
+    raise ValueError(f"Could not find adapter weights for target module: {target_module_name}")
 
-    if lora_A is None or lora_B is None:
-        raise ValueError(f"Could not find LoRA adapter weights for target module: {target_module_name}")
 
-    # Delta W = scaling * (B @ A) -> shape [d_out, d_in]
-    delta_w = scaling * torch.matmul(lora_B, lora_A)
+def extract_lora_delta_w(peft_model, target_module_name: str = "layers.0.self_attn.q_proj") -> torch.Tensor:
+    """Compatibility wrapper returning the effective LoRA or DoRA update."""
+    delta_w, _ = extract_adapter_update(peft_model, target_module_name)
     return delta_w
 
 
@@ -137,7 +138,7 @@ def analyze_model_updates(base_model_name: str, adapter_path: str = None, output
         return {}
 
     # Sample key adapted modules (e.g. first layer and last layer modules to keep output clean)
-    target_modules = adapted_modules[:4]
+    target_modules = list(dict.fromkeys(adapted_modules[:2] + adapted_modules[-2:]))
 
     report = {}
     print("\n" + "=" * 85)
@@ -146,20 +147,13 @@ def analyze_model_updates(base_model_name: str, adapter_path: str = None, output
 
     for target in target_modules:
         try:
-            delta_w = extract_lora_delta_w(peft_model, target)
-
-            # Get base weight W0
-            w0 = None
-            for name, param in base_model.named_parameters():
-                clean_target = target.replace("base_model.model.", "")
-                if clean_target in name and "weight" in name and "lora" not in name:
-                    w0 = param.data
-                    break
+            delta_w, w0 = extract_adapter_update(peft_model, target)
 
             metrics = compute_matrix_svd_metrics(delta_w, w0)
             report[target] = metrics
 
-            nominal_rank = min(delta_w.shape[0], delta_w.shape[1], 16)
+            module = dict(peft_model.named_modules())[target]
+            nominal_rank = module.r["default"]
             print(f"{target[-38:]:<40} {nominal_rank:<8} {metrics['effective_rank']:<12} {metrics['frobenius_norm']:<12} {metrics['spectral_norm']:<10}")
         except Exception as e:
             print(f"[Weight Analysis Warning] Could not analyze {target}: {e}")

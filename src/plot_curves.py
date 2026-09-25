@@ -28,7 +28,7 @@ METHOD_LABELS = {
     "qlora": "QLoRA (4-bit NF4)",
 }
 
-# Accurate model parameter counts for compute (FLOP) calculations
+# Approximate model parameter counts for subplot labels only
 MODEL_PARAMS = {
     "gpt2_medium": 355_000_000,
     "pythia_410m": 410_000_000,
@@ -88,7 +88,7 @@ def _plot_faceted_metric(
     compute_flops: bool = False,
     override_params: int | None = None
 ):
-    """Plot metric curves organized by model in clean subplots with EMA smoothing."""
+    """Plot held-out validation curves organized by model with EMA smoothing."""
     plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
     models = group_runs_by_model(runs)
     n_models = len(models)
@@ -117,15 +117,17 @@ def _plot_faceted_metric(
             if method not in methods:
                 continue
             history = methods[method]
-            valid = [h for h in history if not math.isnan(h.get("loss", float("nan")))]
+            valid = [h for h in history
+                     if h.get("val_loss") is not None and math.isfinite(h["val_loss"])
+                     and (not compute_flops or h.get("estimated_flops") is not None)]
             if not valid:
                 continue
 
             if compute_flops:
-                x = [6 * params * h["tokens_seen"] for h in valid]
+                x = [h["estimated_flops"] for h in valid]
             else:
                 x = [h[x_key] for h in valid]
-            y = [h["loss"] for h in valid]
+            y = [h["val_loss"] for h in valid]
 
             color = METHOD_COLORS.get(method, "gray")
             label = METHOD_LABELS.get(method, method.upper())
@@ -141,7 +143,7 @@ def _plot_faceted_metric(
         param_str = f"{params / 1e9:.2f}B" if params >= 1e9 else f"{params / 1e6:.0f}M"
         ax.set_title(f"{model} (~{param_str})", fontsize=11, fontweight="bold")
         ax.set_xlabel(x_label, fontsize=9)
-        ax.set_ylabel("Loss (Cross-Entropy)", fontsize=9)
+        ax.set_ylabel("Validation Loss (Cross-Entropy)", fontsize=9)
         ax.tick_params(labelsize=8)
 
     for j in range(len(model_names), len(axes)):
@@ -166,23 +168,23 @@ def _plot_faceted_metric(
 
 
 def plot_loss_vs_tokens(runs: dict[str, list[dict]], save_path: str = "plots/fig1_loss_vs_tokens.png"):
-    """Figure 1: Cross-entropy loss vs. tokens seen (Data / Sample Efficiency)."""
+    """Figure 1: Held-out loss vs. tokens seen (data efficiency)."""
     _plot_faceted_metric(
         runs=runs,
         x_key="tokens_seen",
         x_label="Tokens Seen",
-        title="Fine-Tuning Loss vs. Tokens Seen (Data Efficiency)",
+        title="Validation Loss vs. Tokens Seen (Data Efficiency)",
         save_path=save_path
     )
 
 
 def plot_loss_vs_time(runs: dict[str, list[dict]], save_path: str = "plots/fig2_loss_vs_time.png"):
-    """Figure 2: Cross-entropy loss vs. elapsed seconds (Wall-Clock Speed)."""
+    """Figure 2: Held-out loss vs. training seconds."""
     _plot_faceted_metric(
         runs=runs,
         x_key="elapsed_seconds",
         x_label="Elapsed Seconds",
-        title="Fine-Tuning Loss vs. Elapsed Seconds (Wall-Clock Speed)",
+        title="Validation Loss vs. Training Seconds",
         save_path=save_path
     )
 
@@ -192,12 +194,16 @@ def plot_loss_vs_compute(
     save_path: str = "plots/fig3_loss_vs_compute.png",
     total_params: int | None = None
 ):
-    """Figure 3: Cross-entropy loss vs. FLOPs using model-specific parameter counts."""
+    """Figure 3: Held-out loss vs. recorded FLOPs, when available."""
+    if not any(h.get("estimated_flops") is not None and h.get("val_loss") is not None
+               for history in runs.values() for h in history):
+        print("Skipping FLOPs plot: logs contain no FLOP measurements.")
+        return
     _plot_faceted_metric(
         runs=runs,
         x_key="tokens_seen",
-        x_label="FLOPs (6 × P_model × Tokens)",
-        title="Fine-Tuning Loss vs. Compute (FLOP Efficiency)",
+        x_label="Recorded FLOPs",
+        title="Validation Loss vs. Recorded Compute",
         save_path=save_path,
         compute_flops=True,
         override_params=total_params
@@ -221,7 +227,7 @@ def plot_vram_comparison(runs: dict[str, list[dict]], save_path: str = "plots/fi
         vrams = []
         for model in models:
             if method in models_dict[model]:
-                vrams.append(max(h.get("peak_vram_mb", 0) for h in models_dict[model][method]))
+                vrams.append(max((h.get("peak_vram_mb", 0) for h in models_dict[model][method]), default=0))
             else:
                 vrams.append(0)
 
@@ -269,7 +275,7 @@ def plot_vram_comparison(runs: dict[str, list[dict]], save_path: str = "plots/fi
 
 
 def plot_all(log_files: dict[str, str], save_path: str = "plots/"):
-    """Load runs from files and generate the complete set of 4 benchmark figures."""
+    """Load runs and generate validation, memory, and available compute figures."""
     runs = {}
     for name, log_path in log_files.items():
         runs[name] = load_log(log_path)
@@ -296,7 +302,7 @@ if __name__ == "__main__":
             log_mapping = {os.path.basename(f).replace(".jsonl", ""): f for f in all_logs}
             print(f"Plotting comparisons across {len(log_mapping)} run(s) from {args.logs_dir} to {target_save}/...")
             plot_all(log_mapping, save_path=target_save)
-            print(f"Successfully generated all benchmark plots in {target_save}/!")
+            print(f"Successfully generated available benchmark plots in {target_save}/!")
         else:
             print(f"No log files found in {args.logs_dir}.")
     else:
@@ -308,7 +314,7 @@ if __name__ == "__main__":
                 log_map_5090 = {os.path.basename(f).replace(".jsonl", ""): f for f in logs_5090}
                 print(f"Plotting comparisons across {len(log_map_5090)} run(s) from results5090/logs to plots5090/...")
                 plot_all(log_map_5090, save_path="plots5090")
-                print("Successfully generated all benchmark plots in plots5090/!")
+                print("Successfully generated available benchmark plots in plots5090/!")
                 generated_any = True
 
         # 2. Generate for logs/ if present
@@ -318,8 +324,8 @@ if __name__ == "__main__":
                 log_map_default = {os.path.basename(f).replace(".jsonl", ""): f for f in logs_default}
                 print(f"Plotting comparisons across {len(log_map_default)} run(s) from logs to plots/...")
                 plot_all(log_map_default, save_path="plots")
-                print("Successfully generated all benchmark plots in plots/!")
+                print("Successfully generated available benchmark plots in plots/!")
                 generated_any = True
 
         if not generated_any:
-            print("No log files found in logs/ or results5090/logs.")
+            print("No log files found in logs/ or results5090/logs.")

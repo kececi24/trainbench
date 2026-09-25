@@ -1,5 +1,6 @@
 import argparse
 import os
+import time
 import yaml
 from types import SimpleNamespace
 
@@ -9,9 +10,33 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedul
 from peft import LoraConfig, get_peft_model, TaskType
 from datasets import load_dataset
 from accelerate import Accelerator
+from accelerate.utils import set_seed
 
-from data_accounting import InstructionDataset, collate_fn, count_tokens
+from data_accounting import InstructionDataset, collate_fn, count_tokens, instruction_split_specs
 from metrics import EfficiencyTracker
+
+
+def evaluate_validation(model, loader, accelerator):
+    """Return response-token-weighted validation loss across all ranks."""
+    model.eval()
+    totals = torch.zeros(2, dtype=torch.float64, device=accelerator.device)
+    with torch.no_grad():
+        for batch in loader:
+            batch = {key: value.to(accelerator.device) for key, value in batch.items()}
+            active_tokens = (batch["labels"] != -100).sum()
+            if active_tokens.item() == 0:
+                continue
+            loss = model(**batch).loss
+            totals[0] += loss.detach().double() * active_tokens
+            totals[1] += active_tokens
+    totals = accelerator.reduce(totals, reduction="sum")
+    model.train()
+    if totals[1].item() == 0:
+        raise ValueError("Validation split contains no response tokens")
+    # Every rank evaluates the same held-out rows, avoiding padded duplicates
+    # from a distributed evaluation sampler.
+    eval_tokens = int(totals[1].item() / accelerator.num_processes)
+    return (totals[0] / totals[1]).item(), eval_tokens
 
 
 def train(config, enable_profiling: bool = False):
@@ -19,14 +44,18 @@ def train(config, enable_profiling: bool = False):
     accelerator = Accelerator()
     device = accelerator.device
     is_main = accelerator.is_main_process
+    set_seed(config.experiment.seed, device_specific=True)
 
     # Telemetry tracker only runs on main process
     tracker = None
     if is_main:
-        tracker = EfficiencyTracker(run_name=f"{config.experiment.name}")
+        tracker = EfficiencyTracker(
+            run_name=config.experiment.name,
+            log_dir=getattr(config.tracking, "log_dir", "logs"),
+        )
 
-    dtype = torch.float16
-    if torch.cuda.is_available() and torch.cuda.is_bf16_supported() and getattr(config.model, "dtype", "bfloat16") == "bfloat16":
+    dtype = torch.float32 if device.type == "cpu" else torch.float16
+    if device.type == "cuda" and torch.cuda.is_bf16_supported() and getattr(config.model, "dtype", "bfloat16") == "bfloat16":
         dtype = torch.bfloat16
 
     # 2. QLoRA 4-bit Quantization Setup
@@ -41,9 +70,8 @@ def train(config, enable_profiling: bool = False):
                 bnb_4bit_compute_dtype=dtype,
                 bnb_4bit_use_double_quant=True,
             )
-        except ImportError:
-            if is_main:
-                print("[Warning] bitsandbytes not installed; running standard LoRA without 4-bit quantization.")
+        except ImportError as exc:
+            raise RuntimeError("QLoRA requires bitsandbytes and PEFT 4-bit support") from exc
 
     # 3. Model Loading: In multi-GPU / DDP, avoid hardcoded device_map="cuda"
     device_map = None
@@ -97,13 +125,25 @@ def train(config, enable_profiling: bool = False):
 
     dataset_name = getattr(config.data, "dataset_name", getattr(config.data, "name", "yahma/alpaca-cleaned"))
     train_samples = getattr(config.data, "train_samples", 500)
-    raw_data = load_dataset(dataset_name, split=f"train[:{train_samples}]")
+    val_samples = getattr(config.data, "val_samples", 50)
+    train_split, val_split = instruction_split_specs(train_samples, val_samples)
+    raw_data = load_dataset(dataset_name, split=train_split)
+    raw_val = load_dataset(dataset_name, split=val_split)
     dataset = InstructionDataset(raw_data, tokenizer, max_length=config.data.max_length)
+    val_dataset = InstructionDataset(raw_val, tokenizer, max_length=config.data.max_length)
+    if not dataset or not val_dataset:
+        raise ValueError("Training and validation splits must both contain usable responses")
     loader = DataLoader(
         dataset,
         batch_size=config.data.batch_size,
         shuffle=False,
         collate_fn=lambda b: collate_fn(b, pad_token_id=tokenizer.pad_token_id)
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config.data.batch_size,
+        shuffle=False,
+        collate_fn=lambda b: collate_fn(b, pad_token_id=tokenizer.pad_token_id),
     )
 
     # 6. Optimizer & Scheduler
@@ -115,14 +155,30 @@ def train(config, enable_profiling: bool = False):
     model, optimizer, loader, scheduler = accelerator.prepare(
         model, optimizer, loader, scheduler
     )
+    if len(loader) == 0:
+        raise ValueError("Prepared training loader is empty")
 
     model.train()
     if is_main and tracker is not None:
         tracker.start()
 
+    if is_main and device.type == "cuda":
+        torch.cuda.synchronize(device)
+    baseline_started = time.perf_counter() if is_main else 0.0
+    baseline_loss, baseline_tokens = evaluate_validation(model, val_loader, accelerator)
+    if is_main and tracker is not None:
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        tracker.exclude_time(time.perf_counter() - baseline_started)
+        tracker.log_step(
+            step=0, loss=None, lr=float(scheduler.get_last_lr()[0]),
+            batch_non_pad_tokens=0, batch_size=0,
+            val_loss=baseline_loss, eval_tokens=baseline_tokens,
+        )
+
     # Configure Profiler on main process if requested
     prof = None
-    if enable_profiling and is_main and torch.cuda.is_available():
+    if enable_profiling and is_main and device.type == "cuda":
         print(f"\n[Profiler] CUPTI Profiler ENABLED for run: {config.experiment.name}")
         prof = torch.profiler.profile(
             activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
@@ -134,53 +190,74 @@ def train(config, enable_profiling: bool = False):
         prof.start()
 
     global_step = 0
-    use_nvtx = torch.cuda.is_available()
+    use_nvtx = device.type == "cuda"
+    max_steps = config.training.max_steps
+    eval_every = getattr(config.training, "eval_every_steps", max(1, max_steps // 10))
+    if eval_every < 1:
+        raise ValueError("eval_every_steps must be positive")
 
-    for batch_id, batch in enumerate(loader):
-        if global_step >= config.training.max_steps:
-            break
+    while global_step < max_steps:
+        for batch in loader:
+            if global_step >= max_steps:
+                break
 
-        if use_nvtx and is_main: torch.cuda.nvtx.range_push("Forward_Pass")
-        outputs = model(**batch)
-        loss = outputs.loss
-        if use_nvtx and is_main: torch.cuda.nvtx.range_pop()
+            if use_nvtx and is_main: torch.cuda.nvtx.range_push("Forward_Pass")
+            outputs = model(**batch)
+            loss = outputs.loss
+            if use_nvtx and is_main: torch.cuda.nvtx.range_pop()
 
-        if use_nvtx and is_main: torch.cuda.nvtx.range_push("Backward_Pass")
-        # Accelerator handles distributed gradient AllReduce across GPUs
-        accelerator.backward(loss)
-        if use_nvtx and is_main: torch.cuda.nvtx.range_pop()
+            if use_nvtx and is_main: torch.cuda.nvtx.range_push("Backward_Pass")
+            # Accelerator handles distributed gradient AllReduce across GPUs
+            accelerator.backward(loss)
+            if use_nvtx and is_main: torch.cuda.nvtx.range_pop()
 
-        if use_nvtx and is_main: torch.cuda.nvtx.range_push("Optimizer_Step")
-        accelerator.clip_grad_norm_(model.parameters(), max_norm=getattr(config.training, "gradient_clip", 1.0))
-        optimizer.step()
-        scheduler.step()
-        optimizer.zero_grad()
-        if use_nvtx and is_main: torch.cuda.nvtx.range_pop()
+            if use_nvtx and is_main: torch.cuda.nvtx.range_push("Optimizer_Step")
+            accelerator.clip_grad_norm_(model.parameters(), max_norm=getattr(config.training, "gradient_clip", 1.0))
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+            if use_nvtx and is_main: torch.cuda.nvtx.range_pop()
 
-        # Multi-GPU Token Accounting: gather real non-padding tokens across all ranks
-        local_stats = count_tokens(batch)
-        local_tokens = local_stats["non_pad_tokens"]
-        if accelerator.num_processes > 1:
-            tokens_tensor = torch.tensor([local_tokens], device=device)
-            total_step_tokens = accelerator.gather(tokens_tensor).sum().item()
-        else:
-            total_step_tokens = local_tokens
+            # Count actual examples and response/non-padding tokens across all ranks.
+            local_stats = count_tokens(batch)
+            step_stats = torch.tensor([
+                loss.item() * local_stats["trained_tokens"],
+                local_stats["trained_tokens"],
+                local_stats["non_pad_tokens"],
+                batch["input_ids"].shape[0],
+            ], device=device, dtype=torch.float64)
+            step_stats = accelerator.reduce(step_stats, reduction="sum")
+            train_loss = (step_stats[0] / step_stats[1]).item()
 
-        if is_main and tracker is not None:
-            current_lr = float(scheduler.get_last_lr()[0])
-            effective_batch = config.data.batch_size * accelerator.num_processes
-            tracker.log_step(
-                step=global_step,
-                loss=loss.item(),
-                lr=current_lr,
-                batch_non_pad_tokens=total_step_tokens,
-                batch_size=effective_batch
-            )
+            val_loss = None
+            eval_tokens = 0
+            if (global_step + 1) % eval_every == 0 or global_step + 1 == max_steps:
+                if is_main and device.type == "cuda":
+                    torch.cuda.synchronize(device)
+                eval_started = time.perf_counter() if is_main else 0.0
+                val_loss, eval_tokens = evaluate_validation(model, val_loader, accelerator)
+                if is_main and tracker is not None:
+                    if device.type == "cuda":
+                        torch.cuda.synchronize(device)
+                    tracker.exclude_time(time.perf_counter() - eval_started)
 
-        if prof is not None and is_main:
-            prof.step()
+            if is_main and tracker is not None:
+                current_lr = float(scheduler.get_last_lr()[0])
+                tracker.log_step(
+                    step=global_step + 1,
+                    loss=train_loss,
+                    lr=current_lr,
+                    batch_non_pad_tokens=int(step_stats[2].item()),
+                    batch_trained_tokens=int(step_stats[1].item()),
+                    batch_size=int(step_stats[3].item()),
+                    val_loss=val_loss,
+                    eval_tokens=eval_tokens,
+                )
 
-        global_step += 1
+            if prof is not None and is_main:
+                prof.step()
+
+            global_step += 1
 
     if prof is not None and is_main:
         prof.stop()

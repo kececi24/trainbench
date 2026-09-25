@@ -4,6 +4,14 @@ from transformers import AutoTokenizer
 from datasets import load_dataset
 
 
+def instruction_split_specs(train_samples: int, val_samples: int) -> tuple[str, str]:
+    """Return adjacent, disjoint slices of a dataset's train split."""
+    if train_samples < 1 or val_samples < 1:
+        raise ValueError("train_samples and val_samples must be positive")
+    return (f"train[:{train_samples}]",
+            f"train[{train_samples}:{train_samples + val_samples}]")
+
+
 class InstructionDataset(Dataset):
     """
     A PyTorch Dataset that formats instructions and masks prompt tokens with -100.
