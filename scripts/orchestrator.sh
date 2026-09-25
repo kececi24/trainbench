@@ -197,7 +197,7 @@ for method in "${METHODS[@]}"; do
 
             if [[ "$FORCE_FSDP" == true || "$IS_LARGE_FFT" == true || "$IS_LARGE_16BIT_PEFT" == true ]]; then
                 RUN_DIST_MODE="Multi-GPU (FSDP - $NUM_GPUS GPUs)"
-                LAUNCH_CMD=("$PYTHON_BIN" "-m" "accelerate.commands.launch" "--use_fsdp" "--num_processes" "$NUM_GPUS" "--mixed_precision" "bf16" "--fsdp_auto_wrap_policy" "TRANSFORMER_BASED_WRAP")
+                LAUNCH_CMD=("$PYTHON_BIN" "-m" "accelerate.commands.launch" "--use_fsdp" "--num_processes" "$NUM_GPUS" "--mixed_precision" "no" "--fsdp_use_orig_params" "True" "--fsdp_auto_wrap_policy" "TRANSFORMER_BASED_WRAP")
             else
                 RUN_DIST_MODE="Multi-GPU (DDP - $NUM_GPUS GPUs)"
                 LAUNCH_CMD=("$PYTHON_BIN" "-m" "accelerate.commands.launch" "--multi_gpu" "--num_processes" "$NUM_GPUS" "--mixed_precision" "bf16")
