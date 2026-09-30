@@ -23,8 +23,8 @@ data:
 training:
   learning_rate: 0.0002
   weight_decay: 0.01
-  max_steps: 100
-  warmup_steps: 10
+  max_steps: 200
+  warmup_steps: 20
   gradient_clip: 1.0
 tracking:
   log_dir: logs

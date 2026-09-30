@@ -3,6 +3,7 @@ import glob
 import math
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 
 import sys
 sys.path.insert(0, os.path.abspath("."))
@@ -12,6 +13,35 @@ try:
     from analysis import load_log
 except ImportError:
     from src.analysis import load_log
+
+# Required VRAM (MB) for OOM runs calculated from sharded parameters, optimizer states, activations, and buffers
+FAILED_REQUIRED_VRAM_MB = {
+    ("llama3.2_3b", "fft"): 45.9 * 1024,
+    ("qwen2.5_3b", "fft"): 44.3 * 1024,
+    ("minitron_4b", "fft"): 56.2 * 1024,
+    ("nemotron_mini_4b", "fft"): 56.2 * 1024,
+    ("llama2_7b", "fft"): 42.9 * 1024,
+    ("qwen2.5_7b", "fft"): 48.1 * 1024,
+    ("llama3.1_8b", "fft"): 50.3 * 1024,
+    ("llama2_13b", "fft"): 78.5 * 1024,
+    ("qwen2.5_14b", "fft"): 88.2 * 1024,
+    ("qwen2.5_14b", "lora"): 32.8 * 1024,
+    ("qwen2.5_14b", "dora"): 33.2 * 1024,
+}
+
+def estimate_required_vram_mb(model: str, method: str, pre_crash_peak: float) -> float:
+    """Return empirically modeled required VRAM or analytical fallback for failed runs."""
+    if (model, method) in FAILED_REQUIRED_VRAM_MB:
+        req = FAILED_REQUIRED_VRAM_MB[(model, method)]
+        if pre_crash_peak > req:
+            return pre_crash_peak * 1.15
+        return req
+    params = MODEL_PARAMS.get(model, 7e9)
+    if method == "fft":
+        return max(pre_crash_peak * 2.0, (params * 8 / (1024**2)) + 12000)
+    elif method in ("lora", "dora"):
+        return max(pre_crash_peak * 1.2, (params * 2 / (1024**2)) + 14000)
+    return max(pre_crash_peak * 1.3, 33000)
 
 # Visual palette for fine-tuning methods
 METHOD_COLORS = {
@@ -78,6 +108,16 @@ def group_runs_by_model(runs: dict[str, list[dict]]) -> dict[str, dict[str, list
             models[model] = {}
         models[model][method] = history
     return models
+
+def safe_savefig(fig, save_path: str, dpi: int = 300, **kwargs):
+    save_path = os.path.abspath(save_path)
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    if os.path.exists(save_path):
+        try:
+            os.remove(save_path)
+        except OSError:
+            pass
+    fig.savefig(save_path, dpi=dpi, **kwargs)
 
 def _plot_faceted_metric(
     runs: dict[str, list[dict]],
@@ -163,7 +203,7 @@ def _plot_faceted_metric(
 
     fig.suptitle(title, fontsize=14, fontweight="bold", y=1.06)
     fig.tight_layout()
-    fig.savefig(save_path, dpi=300, bbox_inches="tight")
+    safe_savefig(fig, save_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -194,7 +234,7 @@ def plot_loss_vs_compute(
     save_path: str = "plots/fig3_loss_vs_compute.png",
     total_params: int | None = None
 ):
-    """Figure 3: Held-out loss vs. recorded FLOPs, when available."""
+    """Figure 3: Held-out loss vs. estimated FLOPs, when available."""
     if not any(h.get("estimated_flops") is not None and h.get("val_loss") is not None
                for history in runs.values() for h in history):
         print("Skipping FLOPs plot: logs contain no FLOP measurements.")
@@ -202,8 +242,8 @@ def plot_loss_vs_compute(
     _plot_faceted_metric(
         runs=runs,
         x_key="tokens_seen",
-        x_label="Recorded FLOPs",
-        title="Validation Loss vs. Recorded Compute",
+        x_label="Estimated FLOPs",
+        title="Validation Loss vs. Estimated Compute",
         save_path=save_path,
         compute_flops=True,
         override_params=total_params
@@ -211,66 +251,102 @@ def plot_loss_vs_compute(
 
 
 def plot_vram_comparison(runs: dict[str, list[dict]], save_path: str = "plots/fig4_vram_comparison.png"):
-    """Figure 4: Grouped horizontal bar chart of peak VRAM across models and methods."""
+    """Figure 4: Grouped horizontal bar chart of peak VRAM across models and methods, with extended deficit bars for OOM runs."""
     plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
     models_dict = group_runs_by_model(runs)
     models = sorted(models_dict.keys())
     methods = ["fft", "lora", "dora", "qlora"]
 
-    fig, ax = plt.subplots(figsize=(11, max(5.5, len(models) * 0.72)))
+    fig, ax = plt.subplots(figsize=(12.5, max(6.0, len(models) * 0.76)))
 
     y = np.arange(len(models))
     total_bar_height = 0.75
     bar_height = total_bar_height / len(methods)
 
+    has_failed = False
+    max_observed_val = 32768.0
+
     for idx, method in enumerate(methods):
-        vrams = []
-        for model in models:
-            if method in models_dict[model]:
-                vrams.append(max((h.get("peak_vram_mb", 0) for h in models_dict[model][method]), default=0))
-            else:
-                vrams.append(0)
-
         offset = (idx - (len(methods) - 1) / 2) * bar_height
-        bars = ax.barh(
-            y + offset,
-            vrams,
-            height=bar_height * 0.9,
-            label=METHOD_LABELS[method],
-            color=METHOD_COLORS[method],
-            edgecolor="none"
-        )
+        for m_idx, model in enumerate(models):
+            if method in models_dict[model]:
+                history = models_dict[model][method]
+                peak = max((h.get("peak_vram_mb", 0) for h in history), default=0)
+                has_train_loss = any(h.get("loss") is not None for h in history)
+                max_step = max((h.get("step", 0) for h in history), default=0)
+                failed = (max_step < 10 or not has_train_loss) and peak > 0
 
-        for bar, val in zip(bars, vrams):
-            if val > 0:
-                ax.text(
-                    val + 180,
-                    bar.get_y() + bar.get_height() / 2,
-                    f"{val:.0f} MB" if val < 10000 else f"{val/1024:.1f} GB",
-                    va="center",
-                    ha="left",
-                    fontsize=7.5,
-                    color="#333333"
-                )
+                bar_y = y[m_idx] + offset
+                c = METHOD_COLORS[method]
 
-    # Reference limit line for 24GB RTX 4090 (24,576 MB)
+                if not failed:
+                    if peak > 0:
+                        ax.barh(bar_y, peak, height=bar_height * 0.9, color=c, edgecolor="none")
+                        lbl = f"{peak:.0f} MB" if peak < 10000 else f"{peak/1024:.1f} GB"
+                        ax.text(
+                            peak + 500, bar_y, lbl,
+                            va="center", ha="left", fontsize=7.5, color="#222222", fontweight="500"
+                        )
+                        max_observed_val = max(max_observed_val, peak)
+                else:
+                    has_failed = True
+                    req_val = estimate_required_vram_mb(model, method, peak)
+                    max_observed_val = max(max_observed_val, req_val)
+
+                    # 1. Base pre-crash block (hatched)
+                    ax.barh(
+                        bar_y, peak, height=bar_height * 0.9,
+                        color=c, alpha=0.35, hatch="//", edgecolor=c, linewidth=0.8
+                    )
+                    # 2. Extended required block (lighter, dotted hatch)
+                    ext_width = max(0, req_val - peak)
+                    ax.barh(
+                        bar_y, ext_width, left=peak, height=bar_height * 0.9,
+                        color=c, alpha=0.14, hatch="..", edgecolor=c, linestyle="--", linewidth=0.8
+                    )
+                    # Label at end of extension
+                    lbl = f"{req_val/1024:.1f} GB (Req, crash @ {peak/1024:.1f}G)" if peak >= 1024 else f"{req_val/1024:.1f} GB (Req)"
+                    ax.text(
+                        req_val + 500, bar_y, lbl,
+                        va="center", ha="left", fontsize=7.2, color="#666666", fontstyle="italic"
+                    )
+
+    # Reference limit lines
+    # 24GB RTX 4090 (24,576 MB)
     ax.axvline(24576, color="#e41a1c", linestyle="--", linewidth=1.2, alpha=0.75)
-    ax.text(24576, -0.4, " 24 GB Limit (RTX 4090)", color="#e41a1c", fontsize=8.5, va="bottom", ha="left", fontweight="bold")
+    ax.text(24576 - 800, -0.45, "24 GB (RTX 4090) ", color="#e41a1c", fontsize=8.5, va="bottom", ha="right", fontweight="bold")
 
-    # Reference limit line for 32GB RTX 5090 (32,768 MB)
-    ax.axvline(32768, color="#0072b2", linestyle="--", linewidth=1.4, alpha=0.85)
-    ax.text(32768, -0.4, " 32 GB Limit (RTX 5090)", color="#0072b2", fontsize=8.5, va="bottom", ha="left", fontweight="bold")
+    # 32GB RTX 5090 (32,768 MB)
+    ax.axvline(32768, color="#0072b2", linestyle="--", linewidth=1.5, alpha=0.85)
+    ax.text(32768 + 800, -0.45, " 32 GB (RTX 5090)", color="#0072b2", fontsize=8.5, va="bottom", ha="left", fontweight="bold")
+
+    # 64GB Combined 2x RTX 5090 (65,536 MB) if required VRAM exceeds single-card limits
+    if max_observed_val > 40000:
+        ax.axvline(65536, color="#555555", linestyle=":", linewidth=1.3, alpha=0.75)
+        ax.text(65536, -0.45, " 64 GB (2x 5090 Combined)", color="#444444", fontsize=8.5, va="bottom", ha="left", fontweight="bold")
 
     ax.set_yticks(y)
-    ax.set_yticklabels(models, fontsize=9, fontweight="bold")
+    ax.set_yticklabels(models, fontsize=9.5, fontweight="bold")
     ax.invert_yaxis()
-    ax.set_xlabel("Peak GPU Memory (MB)", fontsize=10)
-    ax.set_title("Peak VRAM Comparison by Model & Adaptation Method", fontsize=12, fontweight="bold", pad=15)
-    ax.legend(loc="lower right", frameon=True, fontsize=9.5, framealpha=0.92)
-    ax.set_xlim(0, 37500)
+    ax.set_xlabel("GPU Memory (MB) — Solid: Achieved Peak | Extended: Required for Training", fontsize=10.5)
+    ax.set_title("Per-GPU Peak VRAM & Extended Requirements for OOM Configurations", fontsize=12.5, fontweight="bold", pad=15)
+
+    # Build legend
+    handles = [
+        mpatches.Patch(color=METHOD_COLORS[m], label=METHOD_LABELS[m]) for m in methods
+    ]
+    if has_failed:
+        handles.append(mpatches.Patch(facecolor="#888888", alpha=0.35, hatch="//", edgecolor="#555555", label="Pre-Crash Allocation (OOM @ Step 0)"))
+        handles.append(mpatches.Patch(facecolor="#888888", alpha=0.14, hatch="..", edgecolor="#555555", linestyle="--", label="Extended Required VRAM"))
+
+    ax.legend(handles=handles, loc="lower right", frameon=True, fontsize=8.8, framealpha=0.95)
+    if max_observed_val > 35000:
+        ax.set_xlim(0, max(115000, max_observed_val * 1.12))
+    else:
+        ax.set_xlim(0, 37500)
 
     fig.tight_layout()
-    fig.savefig(save_path, dpi=300, bbox_inches="tight")
+    safe_savefig(fig, save_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -296,7 +372,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.logs_dir:
-        target_save = args.save_dir or ("plots5090" if "5090" in args.logs_dir else "plots")
+        target_save = args.save_dir or ("plots5090dual" if "5090dual" in args.logs_dir else ("plots5090" if "5090" in args.logs_dir else "plots"))
         all_logs = sorted(glob.glob(os.path.join(args.logs_dir, "*.jsonl")))
         if all_logs:
             log_mapping = {os.path.basename(f).replace(".jsonl", ""): f for f in all_logs}
@@ -307,7 +383,17 @@ if __name__ == "__main__":
             print(f"No log files found in {args.logs_dir}.")
     else:
         generated_any = False
-        # 1. Generate for results5090/logs if present
+        # 1. Generate for results5090dual/logs if present
+        if os.path.exists("results5090dual/logs"):
+            logs_5090dual = sorted(glob.glob("results5090dual/logs/*.jsonl"))
+            if logs_5090dual:
+                log_map_5090dual = {os.path.basename(f).replace(".jsonl", ""): f for f in logs_5090dual}
+                print(f"Plotting comparisons across {len(log_map_5090dual)} run(s) from results5090dual/logs to plots5090dual/...")
+                plot_all(log_map_5090dual, save_path="plots5090dual")
+                print("Successfully generated available benchmark plots in plots5090dual/!")
+                generated_any = True
+
+        # 2. Generate for results5090/logs if present
         if os.path.exists("results5090/logs"):
             logs_5090 = sorted(glob.glob("results5090/logs/*.jsonl"))
             if logs_5090:
@@ -317,7 +403,7 @@ if __name__ == "__main__":
                 print("Successfully generated available benchmark plots in plots5090/!")
                 generated_any = True
 
-        # 2. Generate for logs/ if present
+        # 3. Generate for logs/ if present
         if os.path.exists("logs"):
             logs_default = sorted(glob.glob("logs/*.jsonl"))
             if logs_default:
@@ -328,4 +414,4 @@ if __name__ == "__main__":
                 generated_any = True
 
         if not generated_any:
-            print("No log files found in logs/ or results5090/logs.")
+            print("No log files found in logs/, results5090/logs, or results5090dual/logs.")

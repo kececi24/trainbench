@@ -1,1 +1,3 @@
 `bash scripts/orchestrator.sh --profile`
+
+Training logs include cumulative `estimated_flops` at every step, including validation checkpoints. The estimate counts dense matrix multiplications using the actual padded batch shape, trainable versus frozen weights, quadratic attention, and configured gradient checkpointing. It excludes normalization, activations, optimizer work, quantization overhead, and hardware-specific kernels. The log's `flops_estimate_method` identifies the estimate version. `--profile` writes a separate, short CUPTI trace for diagnostics; its FLOP counts are not used for the cumulative estimate. Older logs without `estimated_flops` need a new training run to populate compute-to-target.

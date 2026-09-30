@@ -13,6 +13,7 @@ from accelerate import Accelerator
 from accelerate.utils import set_seed
 
 from data_accounting import InstructionDataset, collate_fn, count_tokens, instruction_split_specs
+from compute_accounting import FlopEstimator
 from metrics import EfficiencyTracker
 
 
@@ -45,14 +46,6 @@ def train(config, enable_profiling: bool = False):
     device = accelerator.device
     is_main = accelerator.is_main_process
     set_seed(config.experiment.seed, device_specific=True)
-
-    # Telemetry tracker only runs on main process
-    tracker = None
-    if is_main:
-        tracker = EfficiencyTracker(
-            run_name=config.experiment.name,
-            log_dir=getattr(config.tracking, "log_dir", "logs"),
-        )
 
     dtype = torch.float32 if device.type == "cpu" else torch.float16
     if device.type == "cuda" and torch.cuda.is_bf16_supported() and getattr(config.model, "dtype", "bfloat16") == "bfloat16":
@@ -106,7 +99,9 @@ def train(config, enable_profiling: bool = False):
         model.to(dtype)
 
     # Enable gradient checkpointing if configured (reduces activation memory overhead)
-    if getattr(config.training, "gradient_checkpointing", False) or getattr(config.model, "gradient_checkpointing", False):
+    gradient_checkpointing = (getattr(config.training, "gradient_checkpointing", False)
+                              or getattr(config.model, "gradient_checkpointing", False))
+    if gradient_checkpointing:
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
         model.gradient_checkpointing_enable()
@@ -115,6 +110,15 @@ def train(config, enable_profiling: bool = False):
     is_fsdp = str(accelerator.distributed_type).upper().endswith("FSDP")
     if device_map is None and quant_config is None and not is_fsdp:
         model.to(device)
+
+    flop_estimator = FlopEstimator.from_model(model, gradient_checkpointing)
+    tracker = None
+    if is_main:
+        tracker = EfficiencyTracker(
+            run_name=config.experiment.name,
+            log_dir=getattr(config.tracking, "log_dir", "logs"),
+            flops_estimate_method=flop_estimator.method,
+        )
 
     # 5. Tokenizer & Data Pipeline
     tokenizer = AutoTokenizer.from_pretrained(config.model.name)
@@ -174,6 +178,7 @@ def train(config, enable_profiling: bool = False):
             step=0, loss=None, lr=float(scheduler.get_last_lr()[0]),
             batch_non_pad_tokens=0, batch_size=0,
             val_loss=baseline_loss, eval_tokens=baseline_tokens,
+            batch_estimated_flops=0,
         )
 
     # Configure Profiler on main process if requested
@@ -225,9 +230,15 @@ def train(config, enable_profiling: bool = False):
                 local_stats["trained_tokens"],
                 local_stats["non_pad_tokens"],
                 batch["input_ids"].shape[0],
+                local_stats["total_elements"],
+                batch["input_ids"].shape[0] * batch["input_ids"].shape[1] ** 2,
             ], device=device, dtype=torch.float64)
             step_stats = accelerator.reduce(step_stats, reduction="sum")
             train_loss = (step_stats[0] / step_stats[1]).item()
+            estimated_step_flops = flop_estimator.estimate_step(
+                padded_token_slots=int(step_stats[4].item()),
+                attention_positions=int(step_stats[5].item()),
+            )
 
             val_loss = None
             eval_tokens = 0
@@ -252,6 +263,7 @@ def train(config, enable_profiling: bool = False):
                     batch_size=int(step_stats[3].item()),
                     val_loss=val_loss,
                     eval_tokens=eval_tokens,
+                    batch_estimated_flops=estimated_step_flops,
                 )
 
             if prof is not None and is_main:

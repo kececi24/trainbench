@@ -84,7 +84,7 @@ def generate_summary_table(log_files: list[str], target_loss: float = 1.20, outp
     endpoints = [_validation_history(log)[-1]["tokens_seen"]
                  for _, log in runs if _validation_history(log)]
     common_budget = min(endpoints) if endpoints else 0
-    header = f"| Method | Final Val Loss | Val PPL | Tokens-to-Target | Time-to-Target | Recorded FLOPs-to-Target | Peak VRAM | Mean Val Loss (to {common_budget:,} tokens) |"
+    header = f"| Method | Final Val Loss | Val PPL | Tokens-to-Target | Time-to-Target | Estimated FLOPs-to-Target | Peak VRAM | Mean Val Loss (to {common_budget:,} tokens) |"
     lines = [header, "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"]
     print(header)
 

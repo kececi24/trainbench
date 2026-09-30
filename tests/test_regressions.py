@@ -11,7 +11,9 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from analysis import calculate_naulc, compute_to_target, find_pareto_frontier, tokens_to_target
+from analysis import (calculate_naulc, compute_to_target, find_pareto_frontier,
+                      generate_summary_table, tokens_to_target)
+from compute_accounting import FlopEstimator
 from data_accounting import instruction_split_specs
 from evaluate import load_finetuned_model
 from metrics import EfficiencyTracker
@@ -67,6 +69,48 @@ class TrackerTests(unittest.TestCase):
             EfficiencyTracker("run", log_dir=directory)
             self.assertEqual(path.read_text(), "")
 
+    def test_estimated_flops_accumulate_in_step_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = EfficiencyTracker("run", log_dir=directory,
+                                        flops_estimate_method="dense_matmul_attention_v1")
+            tracker.start()
+            tracker.log_step(0, None, 1e-4, 0, 0, val_loss=1.0,
+                             batch_estimated_flops=0)
+            tracker.log_step(1, 0.9, 1e-4, 2, 1, val_loss=0.9,
+                             batch_estimated_flops=123)
+            tracker.log_step(2, 0.8, 1e-4, 2, 1, val_loss=0.8,
+                             batch_estimated_flops=456)
+            records = [json.loads(line) for line in
+                       (Path(directory) / "run.jsonl").read_text().splitlines()]
+            self.assertEqual([row["estimated_flops"] for row in records], [0, 123, 579])
+            self.assertEqual(compute_to_target(records, 0.8), 579)
+            self.assertEqual(records[-1]["flops_estimate_method"],
+                             "dense_matmul_attention_v1")
+            summary = Path(directory) / "summary.md"
+            generate_summary_table([str(Path(directory) / "run.jsonl")],
+                                   target_loss=0.8, output_path=str(summary))
+            self.assertIn("Estimated FLOPs-to-Target", summary.read_text())
+            self.assertIn("| 579 |", summary.read_text())
+
+
+class FlopEstimatorTests(unittest.TestCase):
+    def test_frozen_weights_attention_and_checkpointing(self):
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.frozen = torch.nn.Linear(3, 2, bias=False)
+                self.frozen.requires_grad_(False)
+                self.adapter = torch.nn.Linear(2, 4, bias=False)
+                self.config = SimpleNamespace(num_hidden_layers=2, hidden_size=4)
+
+        model = Model()
+        estimator = FlopEstimator.from_model(model)
+        self.assertEqual(estimator.linear_parameters, 14)
+        self.assertEqual(estimator.trainable_linear_parameters, 8)
+        self.assertEqual(estimator.estimate_step(10, 50), 5520)
+        checkpointed = FlopEstimator.from_model(model, gradient_checkpointing=True)
+        self.assertEqual(checkpointed.estimate_step(10, 50), 7400)
+
 
 class EvaluationTests(unittest.TestCase):
     def test_fft_checkpoint_loads_as_full_model(self):
@@ -114,14 +158,15 @@ class TrainingLoopTests(unittest.TestCase):
         class Model(torch.nn.Module):
             def __init__(self):
                 super().__init__()
-                self.weight = torch.nn.Parameter(torch.tensor(1.0))
-                self.config = SimpleNamespace(pad_token_id=None)
+                self.weight = torch.nn.Parameter(torch.tensor([[1.0]]))
+                self.config = SimpleNamespace(pad_token_id=None,
+                                              num_hidden_layers=1, hidden_size=1)
 
             def to(self, *args, **kwargs):
                 return self
 
             def forward(self, input_ids, attention_mask, labels):
-                return SimpleNamespace(loss=(self.weight - 0.5).square() + input_ids.float().mean() * 0)
+                return SimpleNamespace(loss=(self.weight - 0.5).square().mean() + input_ids.float().mean() * 0)
 
             def save_pretrained(self, path, **kwargs):
                 pass
@@ -201,6 +246,9 @@ class TrainingLoopTests(unittest.TestCase):
             self.assertEqual(records[-1]["step"], 5)
             self.assertEqual(records[-1]["tokens_seen"], 10)
             self.assertEqual([row["step"] for row in records if row["val_loss"] is not None], [0, 2, 4, 5])
+            self.assertEqual([row["estimated_flops"] for row in records],
+                             [0, 60, 120, 180, 240, 300])
+            self.assertEqual(compute_to_target(records, records[-1]["val_loss"]), 300)
 
 
 class WeightAnalysisTests(unittest.TestCase):

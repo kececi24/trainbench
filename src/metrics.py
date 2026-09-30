@@ -5,8 +5,10 @@ import torch
 
 class EfficiencyTracker():
 
-    def __init__(self, run_name: str, log_dir: str = "logs") -> None:
+    def __init__(self, run_name: str, log_dir: str = "logs",
+                 flops_estimate_method: str | None = None) -> None:
         self.run_name = run_name
+        self.flops_estimate_method = flops_estimate_method
 
         os.makedirs(log_dir, exist_ok=True)
         self.logfile_path = os.path.join(log_dir, f"{run_name}.jsonl")
@@ -18,6 +20,7 @@ class EfficiencyTracker():
         self.total_tokens_seen = 0
         self.trained_tokens_seen = 0
         self.total_examples_seen = 0
+        self.total_estimated_flops = 0
         self.history = []
         self.excluded_seconds = 0.0
 
@@ -31,7 +34,14 @@ class EfficiencyTracker():
 
     def log_step(self, step: int, loss: float | None, lr: float, batch_non_pad_tokens: int,
                  batch_size: int, val_loss: float | None = None,
-                 eval_tokens: int = 0, batch_trained_tokens: int = 0):
+                 eval_tokens: int = 0, batch_trained_tokens: int = 0,
+                 batch_estimated_flops: int | None = None):
+        if self.flops_estimate_method is not None and batch_estimated_flops is None:
+            raise ValueError("A configured FLOP estimator must provide every step's estimate")
+        if batch_estimated_flops is not None:
+            if batch_estimated_flops < 0:
+                raise ValueError("Step FLOPs must be nonnegative")
+            self.total_estimated_flops += batch_estimated_flops
         self.total_tokens_seen += batch_non_pad_tokens
         self.trained_tokens_seen += batch_trained_tokens
         self.total_examples_seen += batch_size
@@ -51,6 +61,10 @@ class EfficiencyTracker():
             "peak_vram_mb": round(peak_vram_mb, 2),
             "val_loss": round(val_loss, 6) if val_loss is not None else None,
             "eval_tokens": eval_tokens,
+            "estimated_flops": (self.total_estimated_flops
+                                if batch_estimated_flops is not None else None),
+            "flops_estimate_method": (self.flops_estimate_method
+                                      if batch_estimated_flops is not None else None),
         }
 
         self.history.append(record)
