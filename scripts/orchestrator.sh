@@ -11,7 +11,7 @@
 #   --method <fft|lora|dora|qlora|all>   Target fine-tuning method(s) (supports e.g. dora/lora, dora,lora, default: all)
 #   --model  <model_id|all>              Target model id, e.g. qwen2.5_0.5b (default: all)
 #   --num-gpus <N>                       Number of GPUs to use per run (default: 1)
-#   --use-fsdp                           Force FSDP mode (auto-enabled for 7B/14B FFT)
+#   --use-fsdp                           Force FSDP mode (auto-enabled for 7B/14B FFT; auto-routes QLoRA to DDP)
 #   --profile                            Enable CUPTI/PyTorch profiling on runs
 #   --skip-existing                      Skip runs that already have completed logs
 #   --skip-eval                          Skip held-out and forgetting evaluation
@@ -201,11 +201,19 @@ for method in "${METHODS[@]}"; do
             # Auto-enable FSDP for:
             # 1. FFT on 7B+ models (optimizer state is ~4x model size)
             # 2. 16-bit LoRA/DoRA on 13B/14B models (base model is ~29.5GB, saturating single 32GB GPUs in DDP)
-            # 3. Explicitly requested with --use-fsdp
+            # 3. Explicitly requested with --use-fsdp (auto-routes QLoRA to DDP)
             IS_LARGE_FFT=$([[ "$method" == "fft" && "$config_name" =~ (7b|8b|13b|14b) ]] && echo true || echo false)
             IS_LARGE_16BIT_PEFT=$([[ ( "$method" == "lora" || "$method" == "dora" ) && "$config_name" =~ (13b|14b) ]] && echo true || echo false)
 
-            if [[ "$FORCE_FSDP" == true || "$IS_LARGE_FFT" == true || "$IS_LARGE_16BIT_PEFT" == true ]]; then
+            if [[ "$method" == "qlora" ]]; then
+                # QLoRA 4-bit NF4 quantized weights are incompatible with standard FSDP parameter sharding
+                # and comfortably fit within GPU VRAM under DDP (e.g. 14B QLoRA uses ~15GB per GPU)
+                if [[ "$FORCE_FSDP" == true ]]; then
+                    echo -e "${YELLOW}[Note] Auto-routing QLoRA to DDP mode (FSDP does not support 4-bit NF4 quantized base weights).${NC}"
+                fi
+                RUN_DIST_MODE="Multi-GPU (DDP - $NUM_GPUS GPUs)"
+                LAUNCH_CMD=("$PYTHON_BIN" "-m" "accelerate.commands.launch" "--multi_gpu" "--num_processes" "$NUM_GPUS" "--mixed_precision" "bf16")
+            elif [[ "$FORCE_FSDP" == true || "$IS_LARGE_FFT" == true || "$IS_LARGE_16BIT_PEFT" == true ]]; then
                 RUN_DIST_MODE="Multi-GPU (FSDP - $NUM_GPUS GPUs)"
                 LAUNCH_CMD=("$PYTHON_BIN" "-m" "accelerate.commands.launch" "--use_fsdp" "--num_processes" "$NUM_GPUS" "--mixed_precision" "no" "--fsdp_use_orig_params" "True" "--fsdp_auto_wrap_policy" "TRANSFORMER_BASED_WRAP")
             else
