@@ -43,7 +43,10 @@ def check_adapter_tensors(model, checkpoint: Path) -> int:
             missing = sorted(loaded_keys - saved_keys)
             unexpected = sorted(saved_keys - loaded_keys)
             raise RuntimeError(
-                f"Adapter key mismatch: missing={missing[:5]}, unexpected={unexpected[:5]}"
+                f"Adapter key mismatch: file has {len(saved_keys)} keys, model expects "
+                f"{len(loaded_keys)}; missing={len(missing)} {missing[:5]}, "
+                f"unexpected={len(unexpected)} {unexpected[:5]}. "
+                "If unexpected=0, renaming keys cannot restore the missing tensors."
             )
         for key in saved_keys:
             actual = loaded[key].detach().cpu()

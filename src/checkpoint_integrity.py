@@ -4,6 +4,26 @@ import torch
 from peft import get_peft_model_state_dict
 
 
+def expected_lora_keys(model) -> set[str]:
+    """Capture adapter tensor names before FSDP changes the module tree."""
+    expected = set()
+    for name, module in model.named_modules():
+        lora_a = module._modules.get("lora_A")
+        lora_b = module._modules.get("lora_B")
+        if lora_a is None or lora_b is None:
+            continue
+        if set(lora_a) != set(lora_b):
+            raise RuntimeError(f"LoRA A/B adapters differ in module {name}")
+        for adapter_name in lora_a:
+            if adapter_name != "default":
+                raise RuntimeError(f"Unexpected adapter name {adapter_name!r} in {name}")
+            expected.add(f"{name}.lora_A.weight")
+            expected.add(f"{name}.lora_B.weight")
+    if not expected:
+        raise RuntimeError("PEFT model contains no LoRA A/B modules")
+    return expected
+
+
 def normalize_fsdp_wrapped_keys(state_dict: dict) -> dict:
     """Remove exact FSDP wrapper segments without silently merging keys."""
     normalized = {}
@@ -16,7 +36,8 @@ def normalize_fsdp_wrapped_keys(state_dict: dict) -> dict:
     return normalized
 
 
-def prepare_fsdp_adapter_state_dict(model, full_state_dict: dict, method: str) -> dict:
+def prepare_fsdp_adapter_state_dict(model, full_state_dict: dict, method: str,
+                                    expected_keys: set[str]) -> dict:
     """Return a PEFT-compatible full state dict, repairing FSDP wrapper segments.
 
     This repairs *names* only. Missing or zero learned tensors cannot be
@@ -28,11 +49,16 @@ def prepare_fsdp_adapter_state_dict(model, full_state_dict: dict, method: str) -
     if any("_fsdp_wrapped_module" in key for key in adapter_state):
         raise RuntimeError("FSDP wrapper names remain in extracted adapter keys")
 
-    expected_b = sum(len(module._modules["lora_B"]) for module in model.modules()
-                     if "lora_B" in module._modules)
+    missing = sorted(expected_keys - set(adapter_state))
+    if missing:
+        raise RuntimeError(
+            f"FSDP export is missing {len(missing)} expected LoRA tensors: {missing[:5]}"
+        )
+
     b_weights = [value for key, value in adapter_state.items()
                  if ".lora_B." in key]
-    if expected_b == 0 or len(b_weights) != expected_b:
+    expected_b = sum(".lora_B." in key for key in expected_keys)
+    if len(b_weights) != expected_b:
         raise RuntimeError(
             f"FSDP export has {len(b_weights)} LoRA B weights; expected {expected_b}"
         )

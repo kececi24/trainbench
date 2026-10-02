@@ -14,7 +14,7 @@ from accelerate.utils import set_seed
 
 from data_accounting import InstructionDataset, collate_fn, count_tokens, instruction_split_specs
 from compute_accounting import FlopEstimator
-from checkpoint_integrity import prepare_fsdp_adapter_state_dict
+from checkpoint_integrity import expected_lora_keys, prepare_fsdp_adapter_state_dict
 from metrics import EfficiencyTracker
 
 
@@ -157,6 +157,7 @@ def train(config, enable_profiling: bool = False):
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup, num_training_steps=config.training.max_steps)
 
     # 7. Accelerator Preparation (Prepares model, optimizer, dataloader for multi-GPU DDP / FSDP)
+    adapter_keys = expected_lora_keys(model) if config.method.name != "fft" else set()
     model, optimizer, loader, scheduler = accelerator.prepare(
         model, optimizer, loader, scheduler
     )
@@ -297,7 +298,7 @@ def train(config, enable_profiling: bool = False):
         if is_main:
             if config.method.name != "fft":
                 state_dict = prepare_fsdp_adapter_state_dict(
-                    unwrapped_model, state_dict, config.method.name
+                    unwrapped_model, state_dict, config.method.name, adapter_keys
                 )
             unwrapped_model.save_pretrained(checkpoint_dir, state_dict=state_dict)
             tokenizer.save_pretrained(checkpoint_dir)

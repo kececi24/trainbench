@@ -41,6 +41,7 @@ results/
 results*/
 logs/
 *.log
+archieve/
 
 # Checkpoints and models (RTX 4090 training weights)
 checkpoints/
