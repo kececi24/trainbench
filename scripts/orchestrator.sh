@@ -8,7 +8,7 @@
 #   bash scripts/orchestrator.sh [OPTIONS]
 #
 # Options:
-#   --method <fft|lora|dora|qlora|all>   Target fine-tuning method (default: all)
+#   --method <fft|lora|dora|qlora|all>   Target fine-tuning method(s) (supports e.g. dora/lora, dora,lora, default: all)
 #   --model  <model_id|all>              Target model id, e.g. qwen2.5_0.5b (default: all)
 #   --num-gpus <N>                       Number of GPUs to use per run (default: 1)
 #   --use-fsdp                           Force FSDP mode (auto-enabled for 7B/14B FFT)
@@ -63,7 +63,11 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --method)
-            TARGET_METHOD="$2"
+            if [[ "$TARGET_METHOD" == "all" ]]; then
+                TARGET_METHOD="$2"
+            else
+                TARGET_METHOD="${TARGET_METHOD}/$2"
+            fi
             shift 2
             ;;
         --model)
@@ -126,7 +130,8 @@ METHODS=()
 if [[ "$TARGET_METHOD" == "all" ]]; then
     METHODS=("fft" "lora" "dora" "qlora")
 else
-    METHODS=("$TARGET_METHOD")
+    # Split by '/' or ',' or space into array
+    read -r -a METHODS <<< "${TARGET_METHOD//[\/,]/ }"
 fi
 
 echo -e "${BLUE}============================================================${NC}"

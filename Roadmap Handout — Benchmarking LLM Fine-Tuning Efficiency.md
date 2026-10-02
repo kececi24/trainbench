@@ -253,12 +253,7 @@ Instead of training each method once, use multiple dataset fractions:
 or, preferably, fixed token budgets:
 
 \[
-1M,\quad
-5M,\quad
-10M,\quad
-25M,\quad
-50M,\quad
-100M
+1M,\quad 5M,\quad 10M,\quad 25M,\quad 50M,\quad 100M
 \]
 
 tokens.
@@ -358,8 +353,7 @@ Measure:
 ### Tokens per second
 
 \[
-TPS =
-\frac{N_{\text{tokens}}}{T}
+TPS = \frac{N_{\text{tokens}}}{T}
 \]
 
 Report:
@@ -376,10 +370,7 @@ Report:
 Padding should ideally not count.
 
 \[
-TPS_{\text{effective}}
-=
-\frac{\text{non-padding tokens}}
-{\text{training time}}
+TPS_{\text{effective}} = \frac{\text{non-padding tokens}}{\text{training time}}
 \]
 
 This prevents different packing/padding strategies from artificially altering throughput.
@@ -403,8 +394,7 @@ in GB.
 ### Memory per token
 
 \[
-\frac{M_{\max}}
-{\text{tokens per batch}}
+\frac{M_{\max}}{\text{tokens per batch}}
 \]
 
 ---
@@ -456,9 +446,7 @@ Define:
 For a target validation loss:
 
 \[
-N^*(L_t)
-=
-\min_N \{N:L(N)\le L_t\}
+N^*(L_t) = \min_N \{N:L(N)\le L_t\}
 \]
 
 Example:
@@ -477,9 +465,7 @@ Lower is better.
 For downstream performance:
 
 \[
-N^*(Q_t)
-=
-\min_N\{N:Q(N)\ge Q_t\}
+N^*(Q_t) = \min_N\{N:Q(N)\ge Q_t\}
 \]
 
 Example:
@@ -521,10 +507,7 @@ simultaneously.
 For distributed experiments:
 
 \[
-H =
-T_{\text{hours}}
-\times
-N_{\text{GPU}}
+H = T_{\text{hours}} \times N_{\text{GPU}}
 \]
 
 Then:
@@ -562,8 +545,7 @@ One approach:
 ## Loss Improvement per Second
 
 \[
-LER_t =
--\frac{\Delta L}{\Delta t}
+LER_t = -\frac{\Delta L}{\Delta t}
 \]
 
 where LER stands for Learning Efficiency Rate.
@@ -573,8 +555,7 @@ where LER stands for Learning Efficiency Rate.
 ## Loss Improvement per Token
 
 \[
-LER_N =
--\frac{\Delta L}{\Delta N}
+LER_N = -\frac{\Delta L}{\Delta N}
 \]
 
 ---
@@ -582,8 +563,7 @@ LER_N =
 ## Quality Improvement per Token
 
 \[
-QER_N =
-\frac{\Delta Q}{\Delta N}
+QER_N = \frac{\Delta Q}{\Delta N}
 \]
 
 ---
@@ -591,8 +571,7 @@ QER_N =
 ## Quality Improvement per Second
 
 \[
-QER_t =
-\frac{\Delta Q}{\Delta t}
+QER_t = \frac{\Delta Q}{\Delta t}
 \]
 
 These should usually be evaluated over intervals rather than single optimizer steps because training is noisy.
@@ -616,9 +595,7 @@ as the number of tokens FFT requires to achieve quality \(Q\).
 For another method \(m\), at time \(t\):
 
 \[
-ELT_m(t)
-=
-N_{\text{FFT}}\left(Q_m(t)\right)
+ELT_m(t) = N_{\text{FFT}}\left(Q_m(t)\right)
 \]
 
 Interpretation:
@@ -628,18 +605,13 @@ Interpretation:
 Then define:
 
 \[
-ELTPS_m
-=
-\frac{d\,ELT_m(t)}{dt}
+ELTPS_m = \frac{d\,ELT_m(t)}{dt}
 \]
 
 or approximately:
 
 \[
-ELTPS_m
-=
-\frac{\Delta ELT_m}
-{\Delta t}
+ELTPS_m = \frac{\Delta ELT_m}{\Delta t}
 \]
 
 This gives something very close to:
@@ -679,29 +651,19 @@ This could become an interesting methodological contribution if defined carefull
 A simpler metric:
 
 \[
-ELT =
-TPS
-\times
-\eta_{\text{learning}}
+ELT = TPS \times \eta_{\text{learning}}
 \]
 
 where:
 
 \[
-\eta_{\text{learning}}
-=
-\frac{\Delta Q/\Delta N}
-{(\Delta Q/\Delta N)_{\text{reference}}}
+\eta_{\text{learning}} = \frac{\Delta Q/\Delta N}{(\Delta Q/\Delta N)_{\text{reference}}}
 \]
 
 Thus:
 
 \[
-ELT =
-\frac{\text{tokens}}{\text{s}}
-\times
-\frac{\text{quality gained/token}}
-{\text{reference quality gained/token}}
+ELT = \frac{\text{tokens}}{\text{s}} \times \frac{\text{quality gained/token}}{\text{reference quality gained/token}}
 \]
 
 This combines:
@@ -726,8 +688,7 @@ Therefore it should supplement—not replace—the raw curves.
 Instead of choosing one arbitrary target:
 
 \[
-AULC =
-\int_0^B Q(N)dN
+AULC = \int_0^B Q(N)dN
 \]
 
 where \(B\) is a fixed token budget.
@@ -735,9 +696,7 @@ where \(B\) is a fixed token budget.
 Normalize:
 
 \[
-NAULC =
-\frac{1}{B}
-\int_0^B Q(N)dN
+NAULC = \frac{1}{B} \int_0^B Q(N)dN
 \]
 
 This answers:
@@ -755,9 +714,7 @@ AULC captures this.
 Even more useful:
 
 \[
-AULC_C =
-\frac{1}{C_{\max}}
-\int_0^{C_{\max}}Q(C)dC
+AULC_C = \frac{1}{C_{\max}} \int_0^{C_{\max}}Q(C)dC
 \]
 
 This compares quality throughout a fixed compute budget.
@@ -769,16 +726,13 @@ This compares quality throughout a fixed compute budget.
 For PEFT methods:
 
 \[
-E_P =
-\frac{\Delta Q}
-{P_{\text{train}}}
+E_P = \frac{\Delta Q}{P_{\text{train}}}
 \]
 
 Since values become extremely small, report:
 
 \[
-\frac{\Delta Q}
-{\text{million trainable parameters}}
+\frac{\Delta Q}{\text{million trainable parameters}}
 \]
 
 ---
@@ -786,10 +740,7 @@ Since values become extremely small, report:
 Another useful metric:
 
 \[
-E_{PH}
-=
-\frac{\Delta Q}
-{P_{\text{train}}\times GPUHours}
+E_{PH} = \frac{\Delta Q}{P_{\text{train}}\times GPUHours}
 \]
 
 This represents adaptation performance obtained relative to both:
@@ -808,9 +759,7 @@ Important metrics:
 ### Model FLOPs Utilization
 
 \[
-MFU =
-\frac{\text{achieved model FLOPs/s}}
-{\text{theoretical hardware FLOPs/s}}
+MFU = \frac{\text{achieved model FLOPs/s}}{\text{theoretical hardware FLOPs/s}}
 \]
 
 Also record:
@@ -829,8 +778,7 @@ These are especially useful when a method unexpectedly has poor tokens/s.
 If GPU power telemetry is available:
 
 \[
-E =
-\int P(t)dt
+E = \int P(t)dt
 \]
 
 Measure in:
@@ -874,8 +822,7 @@ Track:
 Optional:
 
 \[
-\frac{\|\Delta W\|}
-{\|W\|}
+\frac{\|\Delta W\|}{\|W\|}
 \]
 
 to measure relative update magnitude.
@@ -917,8 +864,7 @@ Question:
 Run:
 
 \[
-r \in
-\{2,4,8,16,32,64\}
+r \in \{2,4,8,16,32,64\}
 \]
 
 Measure:
@@ -1071,10 +1017,7 @@ Evaluate the base model before and after fine-tuning on unrelated tasks.
 Define:
 
 \[
-Forgetting =
-Q_{\text{base}}
--
-Q_{\text{after FT}}
+Forgetting = Q_{\text{base}} - Q_{\text{after FT}}
 \]
 
 Question:
@@ -1090,29 +1033,19 @@ This could be important.
 You can define:
 
 \[
-AdaptationGain
-=
-Q_{\text{target,after}}
--
-Q_{\text{target,before}}
+AdaptationGain = Q_{\text{target,after}} - Q_{\text{target,before}}
 \]
 
 and:
 
 \[
-ForgettingLoss
-=
-Q_{\text{general,before}}
--
-Q_{\text{general,after}}
+ForgettingLoss = Q_{\text{general,before}} - Q_{\text{general,after}}
 \]
 
 Then plot:
 
 \[
-AdaptationGain
-\quad vs \quad
-ForgettingLoss
+AdaptationGain \quad vs \quad ForgettingLoss
 \]
 
 This could reveal important differences between FFT and PEFT.
@@ -1126,13 +1059,7 @@ Do not evaluate only at the end.
 For example evaluate after:
 
 \[
-0,
-1M,
-2M,
-5M,
-10M,
-20M,
-50M
+0,\quad 1M,\quad 2M,\quad 5M,\quad 10M,\quad 20M,\quad 50M
 \]
 
 tokens.
@@ -1282,13 +1209,7 @@ Sequences simultaneously resident on GPU.
 ### Effective batch
 
 \[
-B_{effective}
-=
-B_{micro}
-\times
-gradientAccumulation
-\times
-N_{GPU}
+B_{effective} = B_{micro} \times gradientAccumulation \times N_{GPU}
 \]
 
 Keep effective batch size approximately constant when comparing learning behavior.
@@ -1357,9 +1278,7 @@ Your final benchmark table could look like:
 ## Figure 1
 
 \[
-Validation\ Loss
-\quad vs \quad
-Tokens
+Validation\ Loss \quad vs \quad Tokens
 \]
 
 Measures data efficiency.
@@ -1369,9 +1288,7 @@ Measures data efficiency.
 ## Figure 2
 
 \[
-Validation\ Loss
-\quad vs \quad
-Wall\ Time
+Validation\ Loss \quad vs \quad Wall\ Time
 \]
 
 Measures practical training efficiency.
@@ -1381,9 +1298,7 @@ Measures practical training efficiency.
 ## Figure 3
 
 \[
-Downstream\ Score
-\quad vs \quad
-GPU\ Hours
+Downstream\ Score \quad vs \quad GPU\ Hours
 \]
 
 Probably one of the strongest plots.
@@ -1393,9 +1308,7 @@ Probably one of the strongest plots.
 ## Figure 4
 
 \[
-Score
-\quad vs \quad
-Trainable\ Parameters
+Score \quad vs \quad Trainable\ Parameters
 \]
 
 Measures parameter efficiency.
@@ -1405,9 +1318,7 @@ Measures parameter efficiency.
 ## Figure 5
 
 \[
-Score
-\quad vs \quad
-Peak\ VRAM
+Score \quad vs \quad Peak\ VRAM
 \]
 
 Measures hardware efficiency.
@@ -1419,9 +1330,7 @@ Measures hardware efficiency.
 Pareto frontier:
 
 \[
-Quality
-\quad vs \quad
-Compute
+Quality \quad vs \quad Compute
 \]
 
 Highlight nondominated methods.
@@ -1781,9 +1690,7 @@ AdaLoRA redistributes rank based on learned importance during training rather th
 Therefore compare:
 
 \[
-LoRA(P)
-\quad vs \quad
-AdaLoRA(P)
+LoRA(P) \quad vs \quad AdaLoRA(P)
 \]
 
 at approximately the same adapter budget \(P\).
@@ -1876,17 +1783,7 @@ A strong final framing would be:
 The contribution becomes a multidimensional evaluation framework based on:
 
 \[
-\boxed{
-\text{Quality}
-\times
-\text{Data Efficiency}
-\times
-\text{Compute Efficiency}
-\times
-\text{Memory Efficiency}
-\times
-\text{Parameter Efficiency}
-}
+\boxed{\text{Quality} \times \text{Data Efficiency} \times \text{Compute Efficiency} \times \text{Memory Efficiency} \times \text{Parameter Efficiency}}
 \]
 
 rather than merely another:
@@ -1922,31 +1819,19 @@ The first ten already produce a very strong benchmark.
 Start with:
 
 \[
-\boxed{
-1\ model
-\times
-1\ dataset
-\times
-4\ methods
-\times
-4\ token\ budgets
-}
+\boxed{1\ model \times 1\ dataset \times 4\ methods \times 4\ token\ budgets}
 \]
 
 Methods:
 
 \[
-\boxed{
-FFT,\ LoRA,\ QLoRA,\ DoRA
-}
+\boxed{FFT,\ LoRA,\ QLoRA,\ DoRA}
 \]
 
 Record every few hundred optimizer steps:
 
 \[
-\boxed{
-loss,\ validation\ loss,\ score,\ tokens,\ seconds,\ VRAM
-}
+\boxed{loss,\ validation\ loss,\ score,\ tokens,\ seconds,\ VRAM}
 \]
 
 The first question to answer is simply:
