@@ -16,6 +16,7 @@ import math
 import torch
 from transformers import AutoModelForCausalLM
 from peft import PeftModel
+from checkpoint_integrity import check_adapter_tensors
 
 
 def compute_matrix_svd_metrics(delta_w: torch.Tensor, w0: torch.Tensor = None) -> dict:
@@ -115,12 +116,16 @@ def analyze_model_updates(base_model_name: str, adapter_path: str = None, output
     import os
     import json
 
+    if adapter_path is not None and not os.path.isdir(adapter_path):
+        raise FileNotFoundError(f"Adapter checkpoint directory not found: {adapter_path}")
+
     print(f"\n[Weight Analysis] Loading base model: {base_model_name}")
     base_model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32, device_map="cpu")
 
-    if adapter_path is not None and os.path.exists(adapter_path):
+    if adapter_path is not None:
         print(f"Loading adapter: {adapter_path}")
         peft_model = PeftModel.from_pretrained(base_model, adapter_path)
+        check_adapter_tensors(peft_model, adapter_path)
     else:
         # If testing without an external checkpoint, create an in-memory test adapter
         from peft import LoraConfig, get_peft_model, TaskType

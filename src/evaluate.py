@@ -18,6 +18,7 @@ from peft import PeftModel
 from datasets import load_dataset
 
 from data_accounting import InstructionDataset, collate_fn, instruction_split_specs
+from checkpoint_integrity import check_adapter_tensors
 
 
 def load_finetuned_model(base_model_name: str, checkpoint_path: str | None,
@@ -29,7 +30,9 @@ def load_finetuned_model(base_model_name: str, checkpoint_path: str | None,
         raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_path}")
     if os.path.isfile(os.path.join(checkpoint_path, "adapter_config.json")):
         base_model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=dtype, device_map=device)
-        return PeftModel.from_pretrained(base_model, checkpoint_path)
+        model = PeftModel.from_pretrained(base_model, checkpoint_path)
+        check_adapter_tensors(model, checkpoint_path)
+        return model
     return AutoModelForCausalLM.from_pretrained(checkpoint_path, torch_dtype=dtype, device_map=device)
 
 
@@ -127,6 +130,7 @@ def compute_forgetting_metrics(base_model_name: str, adapter_checkpoint_path: st
         print(f"Loading Fine-Tuned Checkpoint from: {adapter_checkpoint_path}")
         if os.path.isfile(os.path.join(adapter_checkpoint_path, "adapter_config.json")):
             ft_model = PeftModel.from_pretrained(base_model, adapter_checkpoint_path)
+            check_adapter_tensors(ft_model, adapter_checkpoint_path)
         else:
             del base_model
             gc.collect()

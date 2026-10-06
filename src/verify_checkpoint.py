@@ -12,13 +12,12 @@ from pathlib import Path
 import torch
 import yaml
 from datasets import load_dataset
-from peft import get_peft_model_state_dict
-from safetensors import safe_open
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
 from data_accounting import InstructionDataset, collate_fn, instruction_split_specs
 from evaluate import load_finetuned_model
+from checkpoint_integrity import check_adapter_tensors
 
 
 def last_validation_record(path: Path) -> dict:
@@ -28,32 +27,6 @@ def last_validation_record(path: Path) -> dict:
         if record.get("val_loss") is not None and math.isfinite(record["val_loss"]):
             return record
     raise ValueError(f"No finite validation loss in {path}")
-
-
-def check_adapter_tensors(model, checkpoint: Path) -> int:
-    weights_path = checkpoint / "adapter_model.safetensors"
-    if not weights_path.is_file():
-        raise FileNotFoundError(f"Missing adapter weights: {weights_path}")
-
-    loaded = get_peft_model_state_dict(model)
-    with safe_open(str(weights_path), framework="pt", device="cpu") as weights:
-        saved_keys = set(weights.keys())
-        loaded_keys = set(loaded)
-        if saved_keys != loaded_keys:
-            missing = sorted(loaded_keys - saved_keys)
-            unexpected = sorted(saved_keys - loaded_keys)
-            raise RuntimeError(
-                f"Adapter key mismatch: file has {len(saved_keys)} keys, model expects "
-                f"{len(loaded_keys)}; missing={len(missing)} {missing[:5]}, "
-                f"unexpected={len(unexpected)} {unexpected[:5]}. "
-                "If unexpected=0, renaming keys cannot restore the missing tensors."
-            )
-        for key in saved_keys:
-            actual = loaded[key].detach().cpu()
-            expected = weights.get_tensor(key).to(dtype=actual.dtype)
-            if actual.shape != expected.shape or not torch.equal(actual, expected):
-                raise RuntimeError(f"Loaded adapter tensor differs from checkpoint: {key}")
-    return len(saved_keys)
 
 
 def validation_loss(model, loader, device: str) -> tuple[float, int]:

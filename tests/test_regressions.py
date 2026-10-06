@@ -8,18 +8,22 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
+from safetensors.torch import save_file
+from transformers import Qwen2Config, Qwen2ForCausalLM
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from analysis import (calculate_naulc, compute_to_target, find_pareto_frontier,
                       generate_summary_table, tokens_to_target)
 from compute_accounting import FlopEstimator
+from checkpoint_integrity import check_adapter_tensors
 from data_accounting import instruction_split_specs
 from evaluate import load_finetuned_model
 from metrics import EfficiencyTracker
 from train import evaluate_validation
 import train as training
-from weight_analysis import extract_adapter_update
+from weight_analysis import analyze_model_updates, extract_adapter_update
 
 
 class AnalysisTests(unittest.TestCase):
@@ -251,7 +255,36 @@ class TrainingLoopTests(unittest.TestCase):
             self.assertEqual(compute_to_target(records, records[-1]["val_loss"]), 300)
 
 
+class CheckpointIntegrityTests(unittest.TestCase):
+    def test_rejects_empty_and_partial_adapter_files(self):
+        config = Qwen2Config(vocab_size=32, hidden_size=16, intermediate_size=32,
+                             num_hidden_layers=1, num_attention_heads=2,
+                             num_key_value_heads=2)
+        model = get_peft_model(Qwen2ForCausalLM(config), LoraConfig(
+            r=2, target_modules=["q_proj"], task_type="CAUSAL_LM"))
+        state = get_peft_model_state_dict(model)
+        with tempfile.TemporaryDirectory() as directory:
+            weights = str(Path(directory) / "adapter_model.safetensors")
+            save_file(state, weights)
+            self.assertEqual(check_adapter_tensors(model, directory), 2)
+            save_file({}, weights, metadata={"format": "pt"})
+            with self.assertRaisesRegex(RuntimeError, "Empty adapter checkpoint"):
+                check_adapter_tensors(model, directory)
+            partial = {key: value for key, value in state.items() if ".lora_B." in key}
+            save_file(partial, weights)
+            with self.assertRaisesRegex(RuntimeError, "missing=1"):
+                check_adapter_tensors(model, directory)
+
+
 class WeightAnalysisTests(unittest.TestCase):
+    def test_missing_checkpoint_fails_before_loading_base(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = str(Path(directory) / "missing")
+            with patch("weight_analysis.AutoModelForCausalLM.from_pretrained") as load:
+                with self.assertRaises(FileNotFoundError):
+                    analyze_model_updates("unused", adapter_path=missing)
+            load.assert_not_called()
+
     def test_uses_effective_merged_weight_and_restores_base(self):
         class Layer:
             merged = False

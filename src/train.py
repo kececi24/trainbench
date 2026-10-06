@@ -14,7 +14,7 @@ from accelerate.utils import set_seed
 
 from data_accounting import InstructionDataset, collate_fn, count_tokens, instruction_split_specs
 from compute_accounting import FlopEstimator
-from checkpoint_integrity import expected_lora_keys, prepare_fsdp_adapter_state_dict
+from checkpoint_integrity import expected_lora_keys, prepare_fsdp_adapter_export
 from metrics import EfficiencyTracker
 
 
@@ -297,8 +297,12 @@ def train(config, enable_profiling: bool = False):
         state_dict = accelerator.get_state_dict(model)
         if is_main:
             if config.method.name != "fft":
-                state_dict = prepare_fsdp_adapter_state_dict(
-                    unwrapped_model, state_dict, config.method.name, adapter_keys
+                # PEFT 0.21 selects adapter tensors using named_modules().
+                # Gather first, then remove nested FSDP wrappers so module names
+                # match the canonical full-state keys. This mutates the module
+                # tree and is safe only at final export, after all FSDP forwards.
+                unwrapped_model, state_dict = prepare_fsdp_adapter_export(
+                    model, state_dict, config.method.name, adapter_keys
                 )
             unwrapped_model.save_pretrained(checkpoint_dir, state_dict=state_dict)
             tokenizer.save_pretrained(checkpoint_dir)

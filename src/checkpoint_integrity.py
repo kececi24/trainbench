@@ -1,7 +1,43 @@
 """Checks for adapter weights lost or misnamed during FSDP export."""
 
+from pathlib import Path
+
 import torch
+from accelerate.utils import extract_model_from_parallel
 from peft import get_peft_model_state_dict
+from safetensors import safe_open
+
+
+def check_adapter_tensors(model, checkpoint: Path | str) -> int:
+    """Reject missing adapter tensors rather than evaluating fresh initialization."""
+    weights_path = Path(checkpoint) / "adapter_model.safetensors"
+    if not weights_path.is_file():
+        raise FileNotFoundError(f"Missing adapter weights: {weights_path}")
+
+    loaded = get_peft_model_state_dict(model)
+    with safe_open(str(weights_path), framework="pt", device="cpu") as weights:
+        saved_keys = set(weights.keys())
+        loaded_keys = set(loaded)
+        if not saved_keys:
+            raise RuntimeError(
+                f"Empty adapter checkpoint: {weights_path}. No learned tensors were saved; "
+                "renaming cannot recover them. Re-export from the trained model or retrain."
+            )
+        if saved_keys != loaded_keys:
+            missing = sorted(loaded_keys - saved_keys)
+            unexpected = sorted(saved_keys - loaded_keys)
+            raise RuntimeError(
+                f"Adapter key mismatch: file has {len(saved_keys)} keys, model expects "
+                f"{len(loaded_keys)}; missing={len(missing)} {missing[:5]}, "
+                f"unexpected={len(unexpected)} {unexpected[:5]}. "
+                "If unexpected=0, renaming keys cannot restore the missing tensors."
+            )
+        for key in saved_keys:
+            actual = loaded[key].detach().cpu()
+            expected = weights.get_tensor(key).to(dtype=actual.dtype)
+            if actual.shape != expected.shape or not torch.equal(actual, expected):
+                raise RuntimeError(f"Loaded adapter tensor differs from checkpoint: {key}")
+    return len(saved_keys)
 
 
 def expected_lora_keys(model) -> set[str]:
@@ -36,10 +72,26 @@ def normalize_fsdp_wrapped_keys(state_dict: dict) -> dict:
     return normalized
 
 
+def prepare_fsdp_adapter_export(model, full_state_dict: dict, method: str,
+                                expected_keys: set[str]):
+    """Align the module tree with gathered keys for final PEFT export.
+
+    All ranks must finish gathering full_state_dict before this call. Recursive
+    unwrapping mutates the tree; do not run further FSDP forwards afterward.
+    """
+    unwrapped = extract_model_from_parallel(model, recursive=True)
+    state_dict = prepare_fsdp_adapter_state_dict(
+        unwrapped, full_state_dict, method, expected_keys
+    )
+    return unwrapped, state_dict
+
+
 def prepare_fsdp_adapter_state_dict(model, full_state_dict: dict, method: str,
                                     expected_keys: set[str]) -> dict:
     """Return a PEFT-compatible full state dict, repairing FSDP wrapper segments.
 
+    The model must already be recursively unwrapped after gathering its full
+    state, so PEFT's structural filtering sees canonical module names.
     This repairs *names* only. Missing or zero learned tensors cannot be
     reconstructed from a checkpoint and must stop the export.
     """
