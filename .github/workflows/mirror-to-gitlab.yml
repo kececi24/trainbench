@@ -18,4 +18,4 @@ jobs:
 
       - name: Push to GitLab
         run: |
-          git push --mirror https://oauth2:${{ secrets.GITLAB_TOKEN }}@git.uysm.org/openllmbench/trainbench.git
+          git push https://oauth2:${{ secrets.GITLAB_TOKEN }}@git.uysm.org/openllmbench/trainbench.git HEAD:github-mirror --tags
