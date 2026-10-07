@@ -3,7 +3,7 @@ experiment:
   seed: 42
 model:
   name: openai-community/gpt2-medium
-  dtype: float16
+  dtype: bfloat16
 method:
   name: fft
 data:
